@@ -1,0 +1,513 @@
+
+<!-- saved from url=(0052)https://www.cs.purdue.edu/homes/cs354/lab5/lab5.html -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+  
+  
+  
+  <meta name="GENERATOR" content="Mozilla/4.79 [en] (X11; U; Linux 2.4.17 i686) [Netscape]">
+  <title>
+Lab 5: 
+Asynchronous Event Handling using Callback Function
+</title>
+<script>
+        window.addEventListener("message", async (event) => {
+          if (event.data && event.data.sender === "sabre") {
+            dijit.byId(event.data.target).set("value", event.data.value);
+          }
+        });
+        </script></head>
+<body>
+<center>
+<h2>CS 354 Spring 2022</h2>
+</center>
+<center>
+<h2>
+Lab 5: 
+Asynchronous Event Handling using Callback Function
+(230 pts)</h2>
+</center>
+<center>
+<h2>Due: 04/13/2022 (Wed.), 11:59 PM</h2>
+</center>
+
+<h2>1. Objectives</h2>
+
+<p>
+The objective of this lab is to implement asynchronous event handling with
+using callback function support in XINU. The bonus problem considers garbage
+collection of heap memory when processes terminate.
+</p>
+
+<hr width="100%">
+<h2>2. Readings</h2>
+
+<p>
+  Read Chapter 8 of the XINU textbook.
+
+</p>
+
+
+<hr width="100%">
+<h2>3. Asynchronous event handling  using callback functions (230 pts)</h2>
+
+<h3>3.1 Overview</h3>
+
+<p>
+This problem concerns implementation of asynchronous event handling using 
+callback functions in XINU which is provided in modern operating systems including
+Linux and Windows. One instance is asynchronous IPC using callback function
+which we discussed under inter-process communication. More generally,
+asynchronous I/O (i.e., IPC is one form of I/O) entails the programmer
+informing a kernel that when a future I/O event such as the receipt of
+a packet from a server on a network interface arises the kernel should
+run user code -- a callback function -- whose function pointer is
+conveyed to the kernel. This step is referred to as registering a callback
+function to respond to an event. Other common events include alarms
+needed to implement timer functions in app code, catching faults (e.g.,
+segmentation fault), responding to child process termination, among
+others.
+</p>
+
+<p>
+As discussed in class, the chief issue when implementing asynchronous
+IPC support is the kernel
+executing the user's callback function in the context of the process
+that registered in user mode.
+For example, when a sender process transmits a message to a receiver
+proess, the sender process executes a system call in the upper half of
+the kernel in kernel mode. The receiver process may have been
+context-switched out because it depleted its time slice, performed
+a blocking system call, or was preempted by another process of higher
+priority when it became ready. When the receiver process
+becomes current in the future, the kernel must not allow the
+receiver process to continue where it left off but induce a detour
+to the receiver process's callback function in user mode. This
+ensures isolation/protection is preserved.
+The same holds for other event types such as when an alarm expires.
+The kernel's lower half detects expiration of an alarm. The process
+that registered the alarm could be the current process, or may have
+been context-switched out prior. Whatever the case, when the
+process that registered a callback function for an alarm becomes
+current and resumes executing, the kernel must enforce a detour
+to the process's callback function in user mode.
+In Linux/MacOS and Windows such events are referred to as 
+signals. Callback functions are also referred to as signal handlers.
+We will use the terms interchangeably in this problem.
+</p>
+
+
+<h3>3.2 Three event types</h3>
+
+<p>
+In this problem we will support three event types: 
+<br><br>
+<i>SIGCHLD</i>. When a process
+terminates, its parent is "notified" in the sense that if the parent
+registered a callback function for event SIGCHLD the callback function is 
+executed. The parent process may not have registered a signal handler
+for SIGCHLD or may have already terminated. Although we considered orphaned
+processes in lab1, in legacy XINU orphaned processes are not adopted.
+When there is no callback function to run or the parent has already terminated,
+the kernel ignores the SIGCHLD event by not taking further action.
+Note that in our uniprocessor
+Galileo backends, a child process terminating and thus raising the
+SIGCHLD signal implies that the parent process is not current.
+In multicore system this simplification need not hold.
+</p>
+
+<p>
+<i>SIGIPC</i>. When a process sends a 1-word message to another process using
+send(), the kernel checks if the receiver process registered a callback
+function for event SIGIPC. If so, the receiver's callback function is
+executed when the receiver process becomes current. As with SIGCHLD, on
+Galileo backends a sender process calling send() implies that the
+receiver process has been context-switched out.
+</p>
+
+<p>
+<i>SIGZERO</i>. 
+We will support signal SIGZERO which is raised when the current process executes an instruction
+that divides by zero triggering exception 0 from Problem 3.2 in lab2.
+By supporting SIGZERO, we provide app programmers with the ability to
+catch the signal and respond as the programmer sees fit.
+Unlike events SIGCHLD and SIGIPC, SIGZERO is synchronous in the sense that
+an instruction executed by the current process triggers the event. This
+affords a simplification since we do not have to wait until the process that
+registered a callback function becomes current before implementing a detour.
+</p>
+
+<p>
+Define the three events in include/mysignal.h as
+</p><pre>#define SIGCHLD 9
+#define SIGIPC 10
+#define SIGZERO 11
+</pre>
+<p></p>
+
+
+<h3>3.3 Callback function registration</h3>
+
+<p>
+A process registers a callback function using a new system call
+</p><pre>syscall sigregister(uint16 evtype, int32 (* func)(void))
+</pre>
+in system/sigregister.c
+the first argument evtype specifies the event type and
+the second argument func specifies the callback function.
+sigregister() returns SYSERR if evtype is undefined and/or
+the function pointer func falls outside the memory region
+of XINU code. For the latter, check initialize.c which uses two global
+variables to output the size of XINU code. This enforces that
+function pointers must point to the text region of XINU's image
+in main memory. sigregister() returns OK if registration succeeds.
+If a process calls sigregister() multiple times for the same
+event, the last call determines the valid function pointer
+(i.e., overwrites the previous function pointer). 
+<p></p>
+
+<p>
+Introduce additional process table fields to note if a process
+has registered callback functions for SIGCHLD, SIGIPC, SIGZERO,
+and fields for their respective function pointers. Describe in
+lab5.pdf the names, types, and roles of any additional fields
+that you have added when implementing Problem 3. Also, add
+a process table field, pid32 prchldpid, where the PID of the
+child process when SIGCHLD is raised is stored. Note that
+multiple child processes may terminate before their common
+parent becomes current and the kernel arranges a detour to
+the parent's SIGCHLD signal handler. The field prchldpid
+stores the PID of the last process that has terminated.
+</p>
+
+
+<h3>3.4 Callback function usage by app programmer</h3>
+
+<p>
+What the callback function does is up to the app programmer. A typical example
+using app code main() for SIGIPC is
+</p><pre>// In main.c.
+int main() {
+   // Part of app initialization.
+   if (sigregister(SIGIPC, &amp;myhandler) == SYSERR) {
+      kprintf("SIGIPC registration failed");
+      return 1;
+   }
+   // App code: does not call receive().
+   while(1);
+}
+
+// In myhandler.c.
+int myhandler() {
+   // mybuf is global variable
+   mybuf = receive();
+   // receive() will not block since SIGIPC event has occurred.
+   // More app code may follow to respond to received message.
+}
+</pre>
+For debugging and testing purposes, use app code with kprintf() in both
+app and kernel code. In general, concurrent client/server apps which comprise
+a large segment of real-world apps follow the above structure where
+the infinite while-loop in main() contains application specific code.
+The application code does not call the callback function myhandler().
+For example,
+in a web browser (client) the while-loop is replaced by code that accepts
+user input (e.g., keyboard, mouse movement), refreshes the GUI, and transmits
+requests to web servers. Responses from web servers are handled
+asynchronously.
+<p></p>
+
+
+<h3>3.5 Callback function execution in user context</h3>
+
+<p>
+<b>Case (i): system calls</b>
+Since callback functions are user code they must be executed in user mode in
+the context of the processes that registered them. In lab2 we implemented
+trapped version of XINU system calls where synchronous interrupt int caused
+a trap to kernel code and instruction iret executed by the system call
+dispatcher untrapped by returning to user code. Linux and Windows additionally
+implement changing privilege levels (user mode and kernel mode) and
+switching stacks when trapping to kernel mode. For system calls the point
+where a detour to a callback function may be effected is inside the
+system call dispatcher before it executes iret. That is, when a process
+returns from a system call (e.g., after sleeping) the system call
+dispatcher checks before executing iret if the current process has 
+registered callback functions and their relevant signals have been 
+raised. If so, the dispatcher modifies the stack so that upon
+executing iret a detour to a callback function is made. Since iret
+untraps to user mode, the callback function is executed in user
+context thus preserving isolation/protection.
+</p>
+
+<p>
+Effecting a detour to a callback function after which a process is made
+to resume where it left off is related to the clandestine attack in Problem
+5.2 of lab4. Software engineering techniques are just that: techniques. 
+They may be used for good or bad. To build software that can withstand
+malicious attacks one must understand the techniques employed by hackers.
+To mount an effective attack, a hacker must understand the techniques
+utilized by software engineers to build production systems.
+There is an endless race to achieve the upper hand.
+The specific ROP technique we will use in lab5 to implement detour may
+not be the method that you used in lab4. We will utilize a technique
+where the run-time stack is modified once by the system call dispatcher
+before executing iret. The modification will cause iret to jump to
+the callback function. When the callback function has completed and
+executes ret, it will jump back to the original return address of
+iret. No extra modification of the stack is needed after the first
+jump to achieve the second jump.
+</p>
+
+<p>
+We will be implementing the detour for legacy XINU system calls which
+are regular C functions, not trapped XINU system calls that we implemented
+in lab2. This means that the detour is not effected by the system call
+dispatcher but at the end of a system call before it executes ret. To
+keep coding minimal, we will only consider the blocking system call
+sleepms(). All other blocking system calls may be modified in the same
+manner. We will define the boundary between user context and kernel
+context in the sleepms() XINU system call when it executes ret after
+calling resched(), blocking, returning from resched(), and
+calling restore(). Thus the main difference is ret instead of 
+iret in trapped system calls. The machine code of sleepms() is generated
+by gcc and before executing the last instruction ret the stack pointer
+ESP must point to the top of the stack where the return address to
+the caller of sleepms() is located. We will grow the stack by 4 bytes
+by pushing the address of the callback function. Since ESP points to
+the callback function, executing ret in sleepms() will cause a jump
+to the callback function and ESP will point to the original
+return address in the stack. The callback function does what it does
+and when it executes the last instruction ret ESP is guaranteed to
+point to the original return address. Hence the callback function
+jumps to the original return address where the caller of sleepms()
+continues where it left off.
+</p>
+
+<p>
+<b>Case (ii): clock interrupt</b>
+Case (i) concerned when a process that registered a callback function
+returns from the upper half of the kernel. Case (ii) concerns the lower
+half where the process may have been context-switched out because it
+depleted its time slice, or a blocked process (e.g., sleeping) of
+higher priority than the current process wakes up and preempts the
+current process. Since we are using sleepms() as the canonical example
+of blocking system calls, both depletion of time slice and
+preemption by a higher priority process are effected by clock
+interrupt handling in the lower half. Thus code modifications must
+be made inside clkdisp.S before iret to check whether a detour needs
+to be made, and, if so, induce it through a one-time stack 
+manipulation similar (but not identical) to case (i). 
+</p>
+
+<p>
+The boundary
+between user context and kernel context in XINU (and Linux/Windows
+on x86) is execution of iret in the lower half. clkdisp.S makes
+sure that ESP points to the top of stack where the return address
+is located before executing iret. Unlike case (i), however, below
+the return address in the stack reside the content of CS and EFLAGS
+which were saved by x86 when a clock interrupt occurred. We know
+from lab2 that iret atomically pops the return address, CS, and
+EFLAGS. We need to modify the stack so that when executing iret
+and changing to user context we jump to the callback function
+in addition to popping CS and EFLAGS. We achieve this goal by
+growing the stack by 4 bytes and "shifting" CS and EFLAGS by 4 bytes
+(toward the top of the stack). This leaves a hole of 4 bytes
+where EFLAGS previously resided. We copy the original return
+address into this hole. At the top of the stack, we write the
+address of the callback function.
+When clkdisp.S executes iret, it atomically pops the callback
+function's return address, original CS, original EFLAGS, and
+jumps to the callback function.
+ESP points to the original return address.
+When the callback function executes ret, it causes a jump
+to the original return address as in case (i).
+</p>
+
+<p>
+In case (i) and (ii), if both SIGIPC and SIGCHLD are raised then
+their respective callback functions have been registered, a detour is
+made for SIGIPC only. SIGCHLD is handled the next time the process
+goes through the checks of case (i) and (ii). That is, after the process
+is context-switched out and becomes current. A more general solution
+where both signals are handled back to back can be implemented by
+not jumping to signal handlers directly but by jumping to a signal
+handler dispatcher function (kernel code running in user mode)
+which then calls signal handlers as needed. The signal dispatcher
+function then returns to the original return address. We will
+not implement the general solution in this problem.
+</p>
+
+<p>
+<b>Case (iii): divide-by-zero exception</b>
+We considered x86 exception 0 in lab2 where _Xint0 in intr.S was
+modified to affect different responses to the interrupt by the lower
+half of the kernel. Modify _Xint0 so that it performs similar tasks
+as clkdisp.S and modifies the run-time stack once before executing 
+iret which causes a jump to the user's callback function. For
+exception 0 the callback function can perform relevant tasks 
+(e.g., to determine what may have caused divide by zero) before
+calling exit() to terminate the process. If the app programmer
+does not call exit(), the callback function upon executin ret
+will jump to the original return address which triggers yet another
+divide-by-zero exception. We will not modify the original return
+address so that ret jumps to the next instruction of divide-by-zero.
+</p>
+
+<p>
+Test your implementation to check that your kernel modifications
+to support asynchronous event processing using callback function (synchronous
+event processing being a simpler case) works correctly.
+Describe in lab5.pdf the test scenarios you have considered to
+establish correctness.
+</p>
+
+<p>
+</p>
+
+<hr width="100%">
+<h2>Bonus problem [60 pts]</h2>
+
+<p>
+XINU uses getmem() to allocate heap memory from a single
+linked list of free memory segments and freemem() to return
+unused memory to the free memory pool. The kernel keeps track of
+per-process stack memory so that when a process terminates its stack
+memory is returned to the free memory list via freestk().
+This is not the case, however, for memory allocated by
+getmem() which gets only freed if a process explicitly
+deallocates memory by calling freemem() which is
+voluntary. 
+That is, when a process terminates any dynamic memory that it was
+allocated but has not freed remains allocated (see the actions
+of kill() which cleans up when a process terminates).
+Even when an application programmer
+ardently tries to free allocated memory before exiting,
+programming mistakes and bugs may result in build-up of memory garbage.
+</p>
+
+<p>
+In our setting of garbage memory collection in XINU,
+we are tackling a modest problem of
+ensuring that all memory allocated to a process through getmem(),
+irrespective of whether freed by a process, are reclaimed by XINU when the process terminates.
+This eliminates memory leakage by implementing
+garbage collection inside the kernel.
+To do so, XINU must track
+dynamic memory allocation and deallocation on a per-process basis 
+and return any unfreed memory to the free list 
+when a process terminates. 
+</p>
+
+<p>
+Design and implement garbage collection support
+in XINU by modifying the system calls,
+getmem() and freemem(), and relevant parts
+of the kernel so that kill() reclaims any unfreed memory
+allocated through getmem(). Describe your design
+including data structure of keep track of allocated memory
+in lab5.pdf.
+Evaluate your garbage collection enabled XINU kernel on 
+test cases where app processes omit freemem() system
+calls.
+Describe the test cases that you used to establish correctness.
+</p>
+
+
+<p></p>
+
+
+<hr width="100%">
+<h2><b>Turn-in instructions</b></h2>
+
+<p>
+General instructions:
+</p>
+
+<p>
+When implementing code in the labs, please
+maintain separate versions/copies of code so that mistakes such
+as unintentional overwriting or deletion of code is prevented. 
+This is in addition to the efficiency that such organization provides.
+You may use any number of version control systems
+such as GIT and RCS. Please make sure that your code is protected from public access. 
+For example, when using GIT, use git that manages code locally instead of its
+on-line counterpart github. If you prefer
+not to use version control tools, you may
+just use manual copy to keep track of different versions required for development
+and testing. More vigilance and discipline may be required when doing so.
+</p>
+
+<p>
+The TAs, when evaluating your code, will use their own test code (principally main())
+to drive your XINU code. The code you put inside main() is for your own testing and will,
+in general, not be considered during evaluation.
+</p>
+
+<p>
+If you are unsure what you need to submit in what format, consult the
+<a href="https://www.cs.purdue.edu/homes/hill341/ta-notes.html">TA notes</a> link.
+If it doesn't answer your question, ask during PSOs and office hours which are
+scheduled M-F.
+</p>
+
+<p>
+Specific instructions:
+</p>
+
+<p>
+1. Format for submitting written lab answers and kprintf() added for 
+testing and debugging purposes in kernel code:
+</p><ul>
+<li>
+Provide your answers to the questions below in lab5.pdf and
+place the file in lab5/. You may use any document editing software
+but your final output must be exported and submitted as a pdf file.
+</li>
+<li>
+For problems where you are asked to print values using kprintf(), use
+conditional compilation (C preprocessor directives #define combined with #if and #endif)
+with macro XINUTEST (in include/process.h) to effect
+print/no print depending on if
+XINUTEST is defined or not. For your debug statements, do the same with macro XINUDEBUG.
+</li>
+</ul>
+
+<p>
+2. Before submitting your work, make sure to double-check the
+<a href="http://www.cs.purdue.edu/homes/hill341/ta-notes.html">TA Notes</a>
+to ensure that any additional requirements and instructions have been followed.
+</p>
+
+<p>3. Electronic turn-in instructions:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; i) Go to the xinu-spring2022/compile
+directory and run "make clean".</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ii) Go to the directory where lab5 (containing
+xinu-spring2022/ and lab5.pdf) is a subdirectory. 
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+For example, if /homes/alice/cs354/lab5/xinu-spring2022 is your directory structure, go to 
+/homes/alice/cs354
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iii) Type the following command
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+turnin -c cs354 -p lab5 lab5</p>
+<p></p>
+<p>
+You can check/list the submitted files using
+<br><br>
+turnin -c cs354 -p lab5 -v
+</p>
+
+
+<p>
+<i>Please make sure to disable all debugging output before submitting your code.</i>
+</p>
+
+
+<hr><a href="https://www.cs.purdue.edu/homes/cs354/index.html">Back to the CS 354 web page</a><br>
+
+
+
+</body></html>

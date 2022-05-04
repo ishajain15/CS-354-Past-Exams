@@ -1,0 +1,610 @@
+<!DOCTYPE html PUBLIC "-//w3c//dtd html 4.0 transitional//en">
+<!-- saved from url=(0052)https://www.cs.purdue.edu/homes/cs354/lab1/lab1.html -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+  
+  
+  
+  <meta name="GENERATOR" content="Mozilla/4.79 [en] (X11; U; Linux 2.4.17 i686) [Netscape]">
+  <title>Lab 1: Getting Acquainted with XINU's Software and Hardware Environment</title>
+<script>
+        window.addEventListener("message", async (event) => {
+          if (event.data && event.data.sender === "sabre") {
+            dijit.byId(event.data.target).set("value", event.data.value);
+          }
+        });
+        </script></head>
+<body>
+<center>
+<h2>CS 354 Spring 2022</h2>
+</center>
+<center>
+<h2>Lab 1: Getting Acquainted with XINU's Software and Hardware Environment (240 pts)</h2>
+</center>
+<center>
+<h2>Due: 2/9/2022 (Wed.), 11:59 PM</h2>
+</center>
+<h2>1. Objectives</h2>
+The objectives of the first lab assignment are to familiarize you with the steps
+involved in compiling and running XINU in our lab, and practice basic
+ABI programming that will be used as a building block in subsequent lab assignments.
+<hr width="100%">
+<h2>2. Readings</h2>
+<ol>
+  <li>    <a href="http://www.cs.purdue.edu/homes/cs354/xinu/xinu-setup.html">XINU set-up</a></li>
+  <li>Chapters 1 and 2 from the XINU textbook.</li>
+</ol>
+
+<hr width="100%">
+
+<p>
+<i>
+For the written components of the problems below, please write your answers in a file, 
+lab1.pdf, and put it under lab1/. You may use any number of word processing software 
+as long as they are able to export content as pdf files using standard fonts. 
+Written answers in any other format will not be accepted. 
+</i>
+</p>
+
+<h2>3. Inspecting and modifying XINU source, compiling, and 
+executing on backend machines (240 pts)</h2>
+
+<p>
+Follow the instructions in the
+<a href="http://www.cs.purdue.edu/homes/cs354/xinu/xinu-setup.html">XINU set-up</a>
+which compiles the XINU source code on a frontend machine (Linux PC)
+in the XINU Lab, grabs an unused x86 Galileo backend machine,
+loads and bootstraps the compiled XINU image. Note that a frontend
+PC's terminal acts as a remote console of the selected
+backend Galileo x86 machine. If XINU bootstraps successfully,
+it will print a greeting message and start a simple shell
+called xsh. The help command will list the set of commands
+supported by xsh. Run some commands on the shell and follow
+the disconnect procedure so that the backend is released.
+Do not hold onto a backend: it is a shared resource.
+</p>
+
+
+<h3>Problem 3.1 (30 pts)</h3>
+
+<p>
+Basic system initialization and steps to app creation in XINU.
+</p>
+
+<p>
+(a)
+<i>XINU initialization and idle process.</i>
+Inside the system/ subdirectory in xinu-spring2022/, you will find the bulk of relevant
+XINU source code. The file start.S contains AT&amp;T assembly code
+that is executed after XINU bootstraps on a backend using the Xboot bootloader. Some
+system initialization is performed by Xboot, but most OS related hardware and software
+initialization is carried out by start.S and other XINU code in system/ after Xboot jumps 
+to start in start.S. Eventually, start.S calls nulluser(), contained in
+initialize.c, which continues the bulk of kernel initialization.
+nulluser() calls
+sysinit() (also in initialize.c) 
+where updates to the data structure proctab[] are made which
+represents XINU's process table. In XINU, as well as in Linux/UNIX
+and Windows, a process table is one of the key data structures
+of an operating system where bookkeeping of all created
+processes is done. In our Galileo x86 backend which has
+a single CPU (or core), only one process can occupy the CPU at a time.
+In a x86 machine with 4 CPUs (i.e.,
+quad-core) up to 4 processes may be running concurrently.
+Most of XINU's kernel code can be found in system/ (.c and .S files) and include/ (.h header files).
+At this time, we will use the terms "process" and "thread" interchangeably.
+Their technical difference will be considered when discussing process
+management.
+</p>
+
+<p>
+When a backend machine bootstraps and performs initialization,
+there is as yet no notion of a "process." That is, the hardware
+just executes a sequence of machine instructions compiled by
+gcc and statically linked on a frontend Linux PC for our target backend x86 CPU (i.e.,
+the binary xinu.xbin). This
+includes machine code translated from initialize.c. nulluser()
+in initialize.c calls sysinit() which
+sets up the process table data structure proctab[] which keeps
+track of relevant information about created processes that have
+not terminated. When a process terminates, its entry is removed
+from proctab[]. After configuring proctab[] to
+hold up to NPROC processes (a system constant defined
+in config/), sysinit() creates the first process,
+called the NULL or idle process. This idle process exists
+not only in XINU but also in Linux/UNIX and Windows. It is the
+ancestor of all other processes in the system in the sense that
+all other processes are created by this special NULL process
+and its descendants through system call create().
+The NULL process is the only process that is not created by system call
+create() but instead "handcrafted" during system initialization.
+Determine in which kernel function the process table data structure,
+proctab[], is initialized. Determine how many processes can exist
+in XINU. To do so, search for NPROC in config/ and include/.
+The former includes XINU configuration files that are used by
+compiler tools to generate C code that is then compiled with
+code in system/. The latter contains the header files of XINU.
+Determine where (i.e., which lines in which code) the NULL process
+is handcrafted without calling create(). 
+Determine what values are assigned as its priority,
+process state, and process ID (PID). 
+</p>
+
+<p>
+(b)
+<i>Role of XINU's main and removing xsh.</i>
+After nulluser() sets up the first process, it spawns
+a child process using system call create() which runs the C code
+startup(). Upon inspecting startup(), you will find that
+all it does is create a child process to run function main() in
+main.c. 
+We will use the child process that executes main() in
+main.c as the test app for gauging the impact of kernel modifications
+on application behavior. In the code of main() in main.c,
+a "Hello World" message is printed after which a child process that runs
+another app, xsh, is spawned which outputs a prompt "xsh $ "
+and waits for user command. We will not be using
+xsh since it is but another app and not relevant for
+understanding operating systems.
+Remove the "Hello World" message from main() and put it in
+a separate function, void mygreeting(void), in system/mygreeting.c.
+Call mygreeting() from nulluser() before it creates the idle process.
+Customize the "Hello World" message so that it contains your name and
+username. Modify main() so that it is completely empty but for a message
+that says "Process running main():" followed by the PID of process.
+To do so, inspect the files in system/ to find a XINU system call that returns
+the PID of the current process.
+The modifications of (b)
+will carry over to all subsequent lab assignments.
+</p>
+
+<p>
+For new functions that are added to XINU, insert its function prototype in 
+include/prototypes.h.
+The header file prototypes.h is included in the aggregate header file xinu.h.
+Every time you make a change to XINU, be it operating system code
+or app code, you need to recompile XINU on a frontend Linux machine and
+load a backend with the new xinu.xbin binary.
+</p>
+
+<h3>Problem 3.2 (60 pts)</h3>
+
+<p>
+We will create our first system call, a variant of create(), mcreate(), which has the
+same function prototype as create() but incorporates minor modifications. 
+</p>
+
+<p>
+(a)
+mcreate()  allows a process
+to take on a default process priority if the priority value in mcreate() is specified as -1.
+If so, the priority of the child process (i.e., process created using mcreate())
+is initialized as the priority of the parent process plus 1.
+Determine the range of priority values that a process can take on in XINU by checking its type. If
+adding 1 were to exceed the range, mycreate() returns SYSERR and process creation fails.
+If mcreate() is followed by resume(), this has the effect of running the child process
+before its parent.
+</p>
+
+<p>
+(b)
+We will disallow negative priority values but for -1. If a value less than -1 is
+passed in mcreate(), it returns SYSERR. Search for the process table priority field,
+prprio, in the code in system/ and determine if there may be a side effect to
+legacy code by imposing the non-negativity restriction. Provide your answer in lab1.pdf.
+</p>
+
+<p>
+(c)
+We will track how many processes that a process has created are still alive
+(i.e., have not terminated). To do so, introduce a new process table field,
+uint16 prnumchildren, that is initialized to 0 when a process is created. In the
+parent process's process table entry increment prnumchildren. 
+We will place a limit on the number of active
+(i.e., still alive) child processes a process can have to NUMCHILDREN. Use #define
+to set the value to 15 in include/process.h. mcreate() checks if creating a new
+child would exceed NUMCHILDREN and, if so, returns SYSERR.
+</p>
+
+<p>
+(d) To support the third modification we need to modify the system call kill()
+which is called when terminating a process.
+kill() calls send() to inform the parent that its child has terminated. Note that
+calling send() to inform the parent, prptr-&gt;prparent, where prptr is a pointer to
+the current process's process table entry, is buggy since the parent process may
+have terminated and its PID allocated to another process.
+In Linux orphaned processes are handled by having a special process, process
+with PID 1, adopt the orphan. In our case, we will introduce a new process state,
+PR_CASPER, defined as 11 in include/process.h. When a process is about to be
+terminated, kill() checks prnumchildren to determine if there are active children.
+If not, normal termination proceeds. If there are active children, the
+process's state is set to PR_CASPER and kill() returns SYSERR.
+In addition to checking whether a terminating process has active children,
+we need to check if its parent is in state PR_CASPER. If so, the parent's
+process table field prnumchildren is decremented, and if the resultant value is
+0 the parent is terminated by calling kill().
+To solve (d), it helps to go over Problem 3.3 first which considers the
+steps that a process follows when it terminates upon executing the last ret
+instruction.
+</p>
+
+<p>
+Place mcreate() in system/mcreate.c and perform tests to evaluate correctness. For example,
+call mcreate() passing -1 as the child's priority value and verify that upon readying the
+child by calling resume() the child executes before the parent.
+In the case of orphaned processes, have a parent spawn two child process and call kill()
+to terminate itself. This should put the parent into state PR_CASPER. Only after both
+child processes have terminated should the parent process be terminated and removed
+from the process table proctab[]. Discuss in lab1.pdf your methods for testing
+correctness of the four modifications. Note that much of software development, and
+that applies to kernel coding, revolves around testing for correctness and performance
+after basic coding that compiles is complete. Testing is a skill that is acquired through
+practice and involves significant effort.
+Make sure to pay attention to quality control.
+</p>
+
+
+<h3>Problem 3.3 (20 pts)</h3>
+
+<p>
+In 3.2(d) we discuss a process terminating by calling kill() with the process's PID as
+argument. When a process is created by calling create() and the first argument, a
+function pointer, points to a function whose last statement is "return" (i.e., ret
+in assembly language) where does the function return to? Find the answer by looking
+at the code of create() and how the stack of the process created to execute the
+code pointed to by the function pointer is configured. After tracking down where
+the function returns to, determine what happens next. How is this related to
+explicitly terminating a process by calling kill()? Describe your answer in lab1.pdf.
+</p>
+
+
+<h3>Problem 3.4 (20 pts)</h3>
+
+<p>
+Some system parameters of XINU are configured in config/Configuration
+which contains meta data from which C code (conf.c and conf.h in config/) is
+produced using automated translation tools. 
+These parsing and lexical analysis tools covered in a compiler course will not concern us as they
+are useful but not necessary for understanding and coding
+XINU.
+The IRQBASE constant 32 in config/Configuration results in its
+inclusion as a C preprocessor directive in config/conf.h. IRQBASE
+defines the component of the x86 interrupt vector to
+which clock interrupts
+are mapped to. Recall from computer architecture that the interrupt
+vector serves as an interface between hardware and software so that when an
+interrupt occurs it is routed to the responsible software component for
+handling it. That is, the interrupt
+handling code of an operating system that is tasked with responding
+to the interrupt.
+The clock interrupt in our x86 Galileo backends is configured to go off 
+every 1 millisecond (msec), i.e., 1000 clock interrupts per second.
+Several years back a popular configuration was 10 msec.
+x86 supports 256 interrupts numbered 0, 1, ..., 255 of which the first
+32, called exceptions (or faults), are reserved for dedicated purposes.
+XINU chooses to configure clock interrupts at interrupt number 32.
+</p>
+
+<p>
+When a clock interrupt is generated, it is routed through interrupt
+number 32 to XINU's kernel code clkdisp.S in system/ which, in turn, calls clkhandler()
+in system/clkhandler.c
+to carry out relevant tasks.
+Modify clkhandler() in clkhandler.c so that a global variable, int msclkcounter, declared
+and initialized to 0 in clkinit.c, is incremented when clkhandler() is called.
+Test that msclkcounter is being updated correctly by XINU's clock interrupt handling code
+by making main() sleep for 3 seconds by calling sleep(), then printing the value of
+msclkcounter. Declare a second global variable, int msclkcounter2, in clkinit.c initialized
+to 0, that is incremented in the clkdisp.S after the call to clkhandler() returns.
+Test using sleep() that msclkcounter2 is being correctly updated by XINU's interrupt
+handling system. Discuss in lab1.pdf your findings and accuracy of the testing method
+using sleep().
+</p>
+
+
+<h3>Problem 3.5 (30 pts)</h3>
+
+<p>
+After nulluser() handcrafts the first process and spawns a child process
+running the code of main(),
+nulluser() enters into an infinite while loop, hence does not terminate.
+The purpose of the idle or NULL process in XINU -- the same holds for
+Linux/UNIX and Windows -- is so that there is always a process to run
+on a CPU when no other processes require CPU cycles.
+It may be that all other processes are sleeping, suspended, or waiting for events such as
+a response from a server.
+When an interrupt occurs XINU temporarily ceases
+running the code of the process executing on Galileo's x86 CPU. With the help
+of x86's interrupt vector jumps to its
+clock interrupt handling code, then returns to the code that was interrupted
+to resume where it left off. We adopt the view that the interrupt handling code
+has been executed by the process whose own code was temporarily put on hold. 
+We say that the interrupt handling code was executed by borrowing the context, or
+state, of the current process occupying the CPU. 
+Thus except during bootloading before the first process is created, all code
+executed on a CPU is viewed as being carried out by some process. This
+includes even interrupt
+handling code that may have nothing to do with the currently running process
+on a CPU.
+To enforce this abstraction,
+we need an idle or NULL process that is always ready to run on the CPU in case
+no other processes require CPU cycles. That is, there is no ready process but
+the idle process.
+</p>
+
+<p>
+In mobile devices, conserving battery power is important, 
+hence a different strategy is needed than to just execute
+an infinite while loop in the idle process which expends energy. 
+In server farms powered
+by electrical grid, an important concern is cooling to dissipate
+heat generated by machines in confined spaces. 
+A CPU that executes instructions consumes energy and generates heat.
+We will implement an energy consumption reduction method by putting
+the CPU in a halted state using the x86 hlt assembly instruction. The hlt instruction
+puts the CPU in a hibernating state until an external interrupt occurs. On our backends,
+this will likely be a clock interrupt which wakes up the CPU so that the interrupt can
+be serviced. 
+To prevent XINU's NULL
+process from continually executing unconditional jumps (which is what an
+infinite while loop with an empty body does) when it occupies the CPU, we 
+add x86's hlt instruction to the body of the while loop. Until an interrupt occurs,
+the NULL process puts Galileo's CPU into hibernation which reduces energy
+consumption and heat generation.
+</p>
+
+<p>
+(a)
+One way to accomplish this energy saving modification 
+is to code an assembly function, myhalt in system/myhalt.S, that executes hlt followed
+by ret, which is called from the body of the infinite while loop of C function nulluser(). 
+Hence nulluser() coded in C calls myhalt coded in AT&amp;T assembly language.
+Code myhalt.S, modify nulluser() to call myhalt, then repeat the msclkcounter2 test
+of Problem 3.4 to check that the modified kernel continues to work correctly.
+Discuss your results in lab1.pdf.
+</p>
+
+<p>
+(b)
+Function calls
+entail caller/callee coordination which incurs overhead through additional instruction execution
+which is what we are aiming to reduce. A more efficient method that does not entail
+calling a function embeds the assembly
+instruction hlt within the C code of nulluser() using in-line assembly. By
+adding the statement asm("hlt") to the body of nulluser()'s infinite while loop,
+we instruct the C compiler gcc to insert the hlt instruction when translating
+the C code into assembly. There is no need for a function call.
+Modify the code of
+nulluser() to utilize in-line assembly to execute hlt inside the infinite
+while loop. 
+Perform the same test as (a) and discuss your results.
+Submit initialize.c that contains nulluser() which implements (a) to execute hlt, 
+not (b). When testing (b), comment out the call to myhalt() of (a) and insert
+asm("hlt").
+</p>
+
+
+<h3>Problem 3.6 (20 pts)</h3>
+
+<p>
+When multiple processes wanting to run on a shared CPU compete, XINU determines who
+gets to run based on their priority values. The same principle applies to Linux/UNIX
+and Windows. The component of an operating system that decides who gets to run next
+is called the scheduler. In XINU the larger the priority value of a process, 
+the more important it is, and the scheduler allocates Galileo's x86 CPU to a
+process that has highest priority. We cannot say "the" process since two or more
+processes may have equal and highest priority.
+In the case of a tie, XINU performs round-robin scheduling which
+means running one process for a while, then switching to another of equal
+and highest priority, and so forth, until coming back to the first
+highest priority process. Then the procedure repeats itself. The time
+spent running a process before switching to another is called time slice or
+quantum. It is given by system constant QUANTUM in XINU which is defined in
+include/kernel.h. Increase its value from 2 to 40 msec.
+Should the change of time slice affect the test results of Problem 3.4?
+Explain your reasoning in lab1.pdf.
+</p>
+
+<p>
+In order to assure that the NULL process only runs if there are no other processes
+wanting to run -- i.e., there are no other ready processes -- we must assign the 
+NULL process the lowest priority and there can be no tie.
+Having looked at initialize.c where the NULL process is handcrafted and modified
+the code of create() into mcreate(), determine if mcreate() guarantees that no
+process created has priority equal to that of the NULL process. If this is not
+the case, implement a fix and describe what you have done in lab1.pdf.
+System call, chprio(), allows the priority of an existing process to be changed.
+Check if chprio() ensures that the NULL process is guaranteed to have 
+lowest priority. If not, implement a fix and annotate the code chprio() to
+note what change has been made.
+</p>
+
+
+<h3>Problem 3.7 (20 pts)</h3>
+
+<p>
+As we have already seen with the hlt instruction in Problem 3.5,
+some aspects of operating system code cannot be implemented in C but require assembly 
+coding to make the hardware do what we want. 
+It is by necessity, not choice. We saw an example in Problem 3.4.
+We will practice coding a function in
+assembly so that it can be called from a function coded in C. This is mainly an 
+exercise in checking that you understand how the CDECL caller/callee convention for our
+32-bit x86 Galileo backends works.
+You will pick up basics of AT&amp;T assembly coding on x86 CPUs. This is useful
+but secondary to understanding how to interface functions at the machine code level, called
+ABI (application binary interface) programming.
+</p>
+
+<p>
+You are given a function
+addtwo() of function prototype, int addtwo(int x, int y), coded in AT&amp;T
+assembly in addtwo.S in the course directory. Copy the file into your system/
+directory and update include/prototypes.h. 
+Call it from main() and verify that it works correctly.
+Use addtwo.S as a starting point to code a function, maxthree() of
+function prototype, int maxthree(int x, int y, int z), coded in AT&amp;T
+assembly in system/maxthree.S that returns the maximum of the three integer
+values passed. Annotate maxthree.S with comments, and add your name and username
+at the beginning of the file.
+Use your understanding of CDECL on 32-bit x86 Galileo machines which we reviewed
+and looking up basic AT&amp;T assembly instructions (confer 
+<a href="https://www.cs.purdue.edu/homes/cs354/manuals.html">reference material</a>).
+Assembly code can vary between different hardware and software platforms.
+However, the logic behind ABI coding remains invariant.
+It is this understanding that is important to acquire. Of course, you will
+be asked to put the understanding to work by implementing working code in
+our specific system environment.
+This is an exercise to help you prepare for kernel coding in lab2
+and beyond.
+</p>
+
+
+<h3>Problem 3.8 (40 pts)</h3>
+
+<p>
+We will do a role reversal of Problem 3.7 where instead of calling a function coded in assembly
+from a function coded in C, we will call a function coded in C from a function
+coded in assembly. You will perform the chores of the caller following CDECL when
+writing assembly code, keeping in mind that the callee's C code, named 
+int maxthreeC(int x, int y, int z), in system/maxthreeC.c to distinguish from its
+assembly counterpart, will be translated by gcc into assembly following CDECL.
+For testing purposes, code an assembly function, int testmaxthree(void), 
+in system/testmaxthree.S
+which will be called from main(). testmaxthree in testmaxthree.S will then call C function,
+int maxthreeC(int x, int y, int z) which returns
+the maximum value. 
+Hardcode the three arguments passed by testmaxthree() to maxthreeC() so that their values
+are 3, 1, and 5. Since gcc is responsible for translating maxthreeC.c and you are responsible for
+caller code testmaxthree.S, you will need to push the three
+arguments (in the right-to-left order dictated by CDECL) onto the stack, 
+followed by the return address before triggering a jump
+to maxthreeC(). The last two steps are performed
+by assembly instruction call.
+After maxthreeC() returns the result in EAX, you will need to preserve
+it which is tantamount to returning the value to main() so that main() can
+output its value by calling kprintf(). Hence the complete picture is that
+main() coded in C calls testmaxthree() coded in assembly which, in turn, calls
+maxthreeC() coded in C. If ABI programming is correctly implemented,
+interfacing between main() and testmaxthree(), and testmaxthree() and maxthreeC(), will
+work seamlessly.
+</p>
+
+
+<p></p>
+<hr width="100%">
+<h2><b>Bonus problem</b> (20 pts)</h2>
+
+<p>
+As a variation of Problem 3.2, implement a modified version of mcreate(), m2create(),
+with the same function prototype that instead of putting a newly created process in
+suspended state puts it in ready state. Examine the code of resume() which calls ready()
+to ready a suspended process. Note that ready performs three tasks: change process
+state to ready, insert the readied process into a priority queue of ready processes
+waiting to run on the CPU, and calls XINU scheduler resched() to give it a chance
+to decide which process to run next. Describe your solution in lab1.pdf and test that
+it works correctly.
+</p>
+
+<p>
+<i>
+Note: The bonus problem provides an opportunity to earn extra credits that
+count toward the lab component of the course. It is intended to help reach the
+maximum contribution of the lab component (45%) more easily. It is purely optional.
+</i>
+</p>
+
+<p></p>
+
+
+<hr width="100%">
+<h2><b>Turn-in instructions</b></h2>
+
+<p>
+General instructions:
+</p>
+
+<p>
+When implementing code in the labs, please
+maintain separate versions/copies of code so that mistakes such
+as unintentional overwriting or deletion of code is prevented. 
+This is in addition to the efficiency that such organization provides.
+You may use any number of version control systems
+such as GIT and RCS. Please make sure that your code is protected from public access. 
+For example, when using GIT, use git that manages code locally instead of its
+on-line counterpart github. If you prefer
+not to use version control tools, you may
+just use manual copy to keep track of different versions required for development
+and testing. More vigilance and discipline may be required when doing so.
+</p>
+
+<p>
+The TAs, when evaluating your code, will use their own test code (principally main())
+to drive your XINU code. The code you put inside main() is for your own testing and will,
+in general, not be considered during evaluation.
+</p>
+
+<p>
+If you are unsure what you need to submit in what format, consult the
+<a href="https://www.cs.purdue.edu/homes/hill341/ta-notes.html">TA notes</a> link.
+If it doesn't answer your question, ask during PSOs and office hours which are
+scheduled M-F.
+</p>
+
+<p>
+Specific instructions:
+</p>
+
+<p>
+1. Format for submitting written lab answers and kprintf() added for 
+testing and debugging purposes in kernel code:
+</p><ul>
+<li>
+Provide your answers to the questions above in lab1.pdf and
+place the file in lab1/. You may use any document editing software
+but your final output must be exported and submitted as a pdf file.
+</li>
+<li>
+For problems where you are asked to print values using kprintf(), use
+conditional compilation (C preprocessor directives #define combined with #if and #endif)
+with macro XINUTEST (in include/process.h) to effect
+print/no print depending on if
+XINUTEST is defined or not. For your debug statements, do the same with macro XINUDEBUG.
+</li>
+</ul>
+
+<p>
+2. Before submitting your work, make sure to double-check the
+<a href="http://www.cs.purdue.edu/homes/hill341/ta-notes.html">TA Notes</a>
+to ensure that any additional requirements and instructions have been followed.
+</p>
+
+<p>3. Electronic turn-in instructions:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; i) Go to the xinu-spring2022/compile
+directory and run "make clean".</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ii) Go to the directory where lab1 (containing
+xinu-spring2022/ and lab1.pdf) is a subdirectory. 
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+For example, if /homes/alice/cs354/lab1/xinu-spring2022 is your directory structure, go to 
+/homes/alice/cs354
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iii) Type the following command
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+turnin -c cs354 -p lab1 lab1</p>
+<p></p>
+<p>
+You can check/list the submitted files using
+<br><br>
+turnin -c cs354 -p lab1 -v
+</p>
+
+
+<p>
+<i>Please make sure to disable all debugging output before submitting your code.</i>
+</p>
+
+<hr><a href="https://www.cs.purdue.edu/homes/cs354/index.html">Back to the CS 354 web page</a><br>
+
+
+</body></html>

@@ -1,0 +1,702 @@
+<!DOCTYPE html PUBLIC "-//w3c//dtd html 4.0 transitional//en">
+<!-- saved from url=(0052)https://www.cs.purdue.edu/homes/cs354/lab2/lab2.html -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+  
+  
+  
+  <meta name="GENERATOR" content="Mozilla/4.79 [en] (X11; U; Linux 2.4.17 i686) [Netscape]">
+  <title>Lab 2: 
+Interrupt Handling in x86 XINU and Trapped System Call Implementation
+</title>
+<script>
+        window.addEventListener("message", async (event) => {
+          if (event.data && event.data.sender === "sabre") {
+            dijit.byId(event.data.target).set("value", event.data.value);
+          }
+        });
+        </script></head>
+<body>
+<center>
+<h2>CS 354 Spring 2022</h2>
+</center>
+<center>
+<h2>Lab 2: 
+Interrupt Handling in x86 XINU and Trapped System Call Implementation (240 pts)
+</h2>
+</center>
+<center>
+<h2>Due: 02/23/2022 (Wed.), 11:59 PM</h2>
+</center>
+<h2>1. Objectives</h2>
+The objectives of this lab are to understand XINU's basic interrupt handling
+on x86 Galileo backends for synchronous interrupts: source of interrupt is either an exception
+(also called fault) or software interrupt int.
+We will then utilize the int instruction to change XINU system calls from regular
+function calls into
+trapped system calls, which follows the traditional method for implementing systems calls
+in Linux and Windows on x86 computers.
+<hr width="100%">
+<h2>2. Readings</h2>
+<ol>
+  <li>    <a href="http://www.cs.purdue.edu/homes/cs354/xinu/xinu-setup.html">XINU set-up</a></li>
+  <li>Chapters 3 and 4 from the XINU textbook.</li>
+</ol>
+
+
+
+<hr width="100%">
+
+<p>
+<i>
+When working on lab2:
+</i>
+</p>
+
+<p>
+<i>
+For the written components of the problems below, please write your answers in a file, 
+lab2.pdf, and put it under lab2/. You may use any number of word processing software 
+as long as they are able to export content as pdf files using standard fonts. 
+Written answers in any other format will not be accepted. 
+</i>
+</p>
+
+<p>
+<i>
+Please use a fresh copy of XINU, xinu-spring2022.tar.gz, but for preserving
+the mygreeting() function from lab1 and removing all code related to xsh from main() (i.e.,
+you are starting with an empty main() before adding code to perform testing). 
+As noted before, main() serves as an app 
+for your own testing purposes. The TAs when evaluating your code will use their own 
+main() to evaluate your XINU kernel modifications.
+</i>
+</p>
+
+<h2>3. Custom handling of synchronous x86 interrupts [90 pts]</h2>
+
+<p>
+Sections 3.1-3.4 describe background for coding problems in sections
+3.5-3.7.
+As noted in class,
+volume of coding is minimal. This allows focusing on logic and implementation
+details to arrive at quality code that is correct and efficient.
+</p>
+
+<h3>3.1 Example: invalid opcode exception</h3>
+
+<p>
+Although gcc is unlikely to generate machine code that triggers an invalid opcode exception which
+is a synchronous interrupt (i.e., "synchronous" in the sense that an instruction of the current
+process is the cause), writing assembly code or embedding assembly in C code can result
+in interrupt number 6 if not careful. One case is accessing x86 control 
+registers CR0-CR8, some of which are reserved. For example, embedding
+<br>
+<br>
+asm("movl %ebx, %cr1");
+<br>
+<br>
+into C code that tries to copy the content of EBX to CR1 will result in interrupt number 6.
+The operation as a whole comprised of opcode
+and operand is considered invalid. Trying to use a general-purpose register such as
+%EAF which does not exist is detected by gcc. CR1 exists but is not used in x86, a
+condition that is not checked by gcc. 
+</p>
+
+<p>
+Modifying the content of control registers is
+part of the task performed by operating system kernels and associated system tools. 
+For example, during bootloading x86's protected mode that separates kernel mode/user mode
+is enabled by setting the PE bit (first bit) of CR0 to 1. In the graduate version of
+CS354, CS503, the last lab assignment involves a 5-week virtual memory lab where paging
+-- a topic we will discuss in the second half of the course -- is enabled after bootloading by
+setting the PG bit (last bit of CR0) to 1. Our XINU version runs with paging disabled,
+i.e., PG = 0.
+</p>
+
+<h3>3.2 Example: divide-by-zero exception</h3>
+
+<p>
+x86 generates a divide-by-zero exception or fault, which is interrupt number 0, if
+an instruction tries to divide a number by zero. For example, C code
+</p><pre>int main() { int x; x = x / 0; }
+</pre>
+when translated into machine code will trigger divide-by-zero exception. As discussed
+in the lectures, the first entry in IDT set up by XINU during system initialization
+(the same goes for Linux and Windows)
+for interrupt number 0 will contain a function pointer to an interrupt handler that
+x86 will jump to. 
+<p></p>
+
+<h3>3.3 Operating system response to synchronous interrupts</h3>
+
+<p>
+For most synchronous interrupts, when an operating system is informed of the interrupt
+by hardware, the default action is to terminate the offending process. For some interrupts,
+an operating system may provide processes (hence app programmer)
+the flexibility to deal with the interrupt without
+terminating the process. This will be the subject of a later lab which corresponds
+to signal handling in Linux/UNIX. A similar feature also exists in Windows.
+In the default XINU, interrupt numbers 0 and 6 on our x86 Galileo backends results in termination 
+of the current process. In Problem 3, we will modify how XINU deals with interrupt number
+6 which involves understanding the interrupt handling interface between hardware and software,
+and coding software so that x86 does what we want it to do.
+</p>
+
+<h3>3.4 Modifying how XINU deals with synchronous interrupts</h3>
+
+<p>
+<b>
+Two methods of triggering synchronous interrupts.
+</b>
+We will consider two methods for triggering synchronous interrupts.
+The first
+method we have already encountered in 3.1 where an invalid operation, "movl %ebx, %cr1",
+where the MOV instructions tries to access CR1 is the cause. In the second method,
+we can use the x86 instruction, int, called software interrupt to generate the invalid
+opcode exception. From C code we embed inline assembly code
+<br>
+<br>
+asm("int $6");
+<br>
+<br>
+which executes instruction int with operand value 6,
+thus generating exception 6. In a similar vein, divide-by-zero exception can be triggered by
+an ALU instruction that actually tries to divide by 0 or by executing
+instruction, int $0. The software interrupt int has several uses, one of which is
+to use as a trap instruction to switch from user code to kernel code. Its counterpart,
+iret, allows untrapping from kernel mode to user mode.
+</p>
+
+<p>
+<b>
+IDT setup in XINU.
+</b>
+XINU's interface to x86's interrupts is through a data structure,
+IDT (interrupt descriptor table), through which hardware and software mutually interface. IDT
+is set up by XINU (same goes for Linux and Windows running on x86), and x86 consults
+IDT to determine which kernel code to run when an interrupt is generated. The
+7'th entry of IDT (interrupt numbers start at 0) is configured to contain a function
+pointer to XINU's interrupt handling code, _Xint6, for dealing with interrupt number 6.
+That is, when interrupt number 6 is generated x86 will jump to _Xint6 whose code
+is located in system/intr.S.
+Similarly for interrupt number 0 which causes a jump to interrupt handling code _Xint0.
+<br><br>
+When we examine assembly code intr.S we find that instructions at _Xint6 cause a jump to Xtrap
+(also in intr.S) which then calls C function trap() located in system/evec.c. Xtrap
+which is coded in assembly passes two arguments to C function
+trap() following CDECL. The first
+argument is the interrupt number. _Xint6 knows the value 6 since
+it is pointed by the 7'th entry of IDT and thus is executing.
+The second argument is a pointer to the saved stack pointer field
+in the process table which specifies the top of the stack of a
+process that is not current. trap() outputs
+the interrupt number, PID, and a number of other state variables which can be 
+helpful when debugging run-time errors. 
+Then trap calls panic() (in system/panic.c) which enters an infinite while-loop.
+That is the reason a backend machine hangs indefinitely after exception 13
+(general protection fault), a common x86 exception you will encounter
+during debugging.
+</p>
+
+<p>
+<b>
+x86 interrupt handling in XINU.
+</b>
+For exception 0 our goal is to modify _Xint0 so that it does not call Xtrap but returns control
+(i.e., jumps) back to the process that triggered the divide-by-zero exception by executing iret.
+Specifically, we want _Xint0 to jump to the instruction of the current process
+that comes next to the divide-by-zero instruction that triggered exception 0. 
+For some synchronous interrupts such as
+page fault (i.e., accessing content in main memory fails
+because it resides on disk and must be copied into main memory), 
+we want to return to the same instruction that caused the page fault interrupt so that
+it can be repeated. Executing the memory access instruction a second time will succeed
+since the missing content has been brought into main memory.
+For divide-by-zero, returning to the same instruction that triggered exception 0
+would cause an infinite loop of exception 0 interrupts.
+We want the process to move on to the next instruction.
+In Linux signal handlers, we want _Xint0 to jump to user code
+-- i.e., signal handler (or callback function in Windows) -- 
+that a programmer has asked Linux to jump to when
+divide-by-zero occurs. Linux supports signal handling for
+exception 0 via the SIGFPE signal but does not support signal handling for
+exception 6. 
+<br><br>
+In the case of exception 6,
+jumping back to the address of instruction "movl %ebx, %cr1"
+is achieved with hardware support. It was noted
+in class that x86 pushes onto the stack of the current process the
+content of EFLAGS, CS, and EIP registers. For some interrupts, an error
+code may be pushed after EIP to convey additional information.
+The first register, EFLAGS, contains
+state information of the current process which must be saved onto the
+process's stack since kernel interrupt handling code (i.e., _Xint6) may
+change the bits of EFLAGS. Before jumping back to the code of the interrupted
+process, the original content of EFLAGS must be restored. The same goes for
+CS which specifies whether the process was running in user mode/kernel mode
+before generating the interrupt. The most important piece is the program
+counter, EIP, which contains the address to jump back to. 
+x86 specifies for which exceptions EIP points to the next instruction, and
+for which instructions EIP points to the same instruction that triggered the
+exception. For both divide-by-zero
+and invalid opcode exceptions, the latter holds.
+Hence to jump to the next instruction and not the instruction that triggered
+the exception, we must modify the value of EIP that was pushed onto the
+stack before executing iret.
+</p>
+
+
+<h3>3.5 Returning from x86 synchronous interrupts</h3>
+
+<p>
+Modify the code at _Xint0 and _Xint6 so that all that they do is execute iret.
+Since x86 pushed the content of EFLAGS, CS, and EIP registers onto the run-time
+stack atomically when exception 0 or 6 occurred
+and ESP points to the top of the stack, executing iret will have the reverse
+effect of atomically popping the saved values of EIP, CS, EFLAGS on the stack
+and restoring the original content of the EIP, CS, and EFLAGS registers.
+Since the EIP value pushed onto the stack by x86 for exceptions 0 and 6 is
+the address of the instruction that triggered the exception, this will result
+in an infinite loop of exceptions. That is, in the case of "movl %ebx, %cr1"
+that generates the invalid opcode exception, it will be executed again and
+again. Hence whatever instruction follows "movl %ebx, %cr1" will not be
+executed. Verify that this is indeed the case for both exceptions. First, check
+that legacy _Xint0 and _Xint6 cause trap() to be called and state information to
+be output before hanging forever due to the infinite while-loop of
+panic(). Include the output you observe in your write-up
+lab2.pdf under lab2/. Second, modify _Xint0 and _Xint6 so that it increments
+a global variable, int interruptcounter, initialized to 0 in initialize.c. If
+the value is greater than 1000, it calls function, void checkintcounter(void),
+in system/checkintcounter.C, which prints interruptcounter and returns.
+Remember to add new function definitions to include/prototypes.h.
+After checkintcounter() returns, _Xint0 and _Xint6 execute iret.
+In test code main(), insert code after asm("movl %ebx, %cr1") to verify that
+it is never reached. Do the same for divide-by-zero C code of 3.2. Discuss
+what you find in lab2.pdf. Make sure to consider where ESP points to in
+the stack after checkcounter() returns.
+For any XINU source code that you modified create
+a subdirectory v1/ under lab2/ and place the files in v1/. For example,
+if you modified intr.S to test that an infinite loop occurs, place
+the modified file intr.S in v1/. Also, put a copy of your test code
+main.c in v1/ so that the TAs can check what testing you performed.
+In addition to your main.c, the TAs will use their own main() to
+evaluate your code.
+</p>
+
+<h3>3.6 Returning from x86 software interrupt int</h3>
+
+<p>
+Modifying _Xint0 and _Xint6 so that they return to the next
+instruction and not result in an infinite loop will be tackled
+in 3.7. Here we will make use of software interrupt, int, to artificially
+generate exceptions 0 and 6 by embedding inline assembly
+asm("int $0") or asm("int $6") in main(). Although executing "int $0"
+has the same effect as dividing by 0 and generates exception 0, 
+a subtle but important difference is that the
+EIP value pushed by x86 onto the stack is that of the next instruction.
+The same goes for "int $6" which triggers the invalid opcode exception.
+Hence when testing the same intr.S code as 3.5, by inspecting the value
+of the global variable interruptcounter after the inline assembly code
+you can verify that iret executed by _Xint0 and _Xint6 return to the
+next instruction in main().
+Create subdirectory v2/ under lab2/ and put your test code main.c in
+v2/. Describe your finding in lab2.pdf.
+</p>
+
+<h3>3.7 Returning to the next instruction by manipulating return address in the stack</h3>
+
+<p>
+In 3.5 because x86 pushed the address of the instruction that generated the
+divide-by-zero or invalid opcode exception, executing iret returned to the same
+instruction causing an infinite loop. In 3.6 we were able to return to the
+next instruction because software interrupt int caused x86 to push the next
+instruction onto the run-time stack. Here we will modify the return address
+pushed by x86 in 3.5 so that its value is that of the next instruction.
+In general, modifying the address to jump to the next instruction can be
+simple or involved. In contrast to ARM processors with fixed
+instruction lengths, x86 has variable length instructions that complicates
+determining the offset to add to the return address pushed on the stack
+to return to the next instruction. Our focus is not becoming expert in x86
+instruction format and finding efficient means for determining offsets in general. 
+For our purpose of practicing return oriented programming (ROI) relevant 
+for coding operating systems, we will use trial-and-error by adding different 
+offset values to the return address on the stack and checking if it works.
+When implementing certain operating system features, we will be overwriting
+return addresses with specific function pointers where knowing the location of
+return addresses on the stack is important.
+</p>
+
+<p>
+Copy the code of 3.5 in v1/ to a subdirectory new v3/. Then modify the return
+address pushed by x86 on the stack in _Xint0 and _Xint6 by adding different
+offset values. Start by adding 1 (offset of 1 byte) and continue by increasing
+the offset until you find the first offset that works. Describe in lab2.pdf
+what happens until you find the right offset.
+</p>
+
+
+<hr width="100%">
+<h2>4. Trapped XINU system calls [150 pts]</h2>
+
+<p>
+As discussed in the lectures and evident by inspection of any XINU system call code,
+all XINU system calls are
+regular C function calls. That is, there is no special trap instruction that
+switches a process from user mode to kernel mode and jumps to a kernel function
+in the upper half of the kernel to carry out the requested service.
+A system call in XINU is not a wrapper function that acts as a gateway to a
+kernel function that actually performs the tasks of a system call. Instead, it is the actual
+kernel function.
+</p>
+
+<p>
+Isolation/protection is a core feature of
+commodity operating systems such as Linux and Windows necessary
+for reliability. It is essential for security.
+Not supporting isolation/protection in special computing environments
+is the exception to the rule. We will re-implement two XINU system
+calls -- chprio() and getprio() -- into trapped
+versions using a traditional technique used in Linux and Windows 
+for x86 machines. chprio() changes the priority of a process to a
+specific value, and getprio() returns the priority of a specific
+process.
+</p>
+
+<h3>4.1 Traditional system call trap using int instruction in Linux and Windows</h3>
+
+<p>
+The traditional approach followed by Linux and Windows on x86 to implement trapped
+system calls is to use software interrupt int to transition from
+user mode to kernel mode and jump to kernel code in the upper half that performs
+the requested service. To return back to user mode after the task has
+been complete, the iret instruction is executed which jumps back to user code in
+user mode and
+continues where the process left off. 
+For example, in Linux the fork() system call
+is a wrapper function (part of the C standard library) that performs a trap,
+and sys_fork() is the kernel function that calls other kernel functions
+to accomplish the requested task of spawning a child process.
+When the wrapper function fork() traps, i.e., executes the int instruction,
+it does not directly jump to sys_fork() but goes through an intermediary --
+the system call dispatcher -- that determines which system call service is being
+requested and jumps to the relevant kernel function sys_fork().
+The traditional method for system call trap using int/iret has been supplanted
+by sysenter/sysexit instructions in Intel x86 CPUs which improves efficiency over 
+the traditional method. The traditional method is relevant for understanding
+the optimized method and also as a pedagogical tool due to its transparency.
+</p>
+
+<h3>4.2 XINU system call dispatcher _Xint40</h3>
+
+<p>
+The operand of software interrupt int specifies the interrupt number that indexes
+the IDT.
+In Linux, interrupt number 128 is used to install the system call dispatcher in
+IDT, whereas in Windows interrupt number 40 is used. System calls are numbered 0, 1, 2, 
+... to identify them inside the kernel.
+Register EAX is used to pass the system call number from a system call
+wrapper function to system call dispatcher.
+In XINU, we will use interrupt number 40 to install a system call dispatcher.
+That is, the 43rd entry in IDT will contain the function pointer of the system
+call dispatcher.
+Interrupt 40 is not used in XINU hence we
+can repurpose _Xint40 in intr.S by modifying its code to perform the 
+chores of a system call dispatcher.
+Interrupt numbers 0, 1, ..., 31 are reserved in x86 for exceptions.
+XINU uses interrupt number 32 to service clock interrupts.
+Any of unused interrupt numbers can be used to trap to the system call dispatcher.
+</p>
+
+<p>
+Arguments of a system call, if any,
+are communicated from system call wrapper function to system call dispatcher
+through registers and stack.
+chprio() has two arguments, getprio() has one.
+The first argument we will pass in register ECX. The second argument, if there
+is one, we will pass through the stack.
+Upon executing "int $40" in the wrapper function, x86 will push EFLAGS, CS, EIP
+on the stack and jump to _Xint40.
+Wrapper functions will communicate to _Xint40 which system call is being called
+through EAX. For chprio(), 10 will be placed in EAX and system call number 11
+will be used to identify getprio(). Any other value passed through EAX will be considered
+invalid by the system call dispatcher which will put -1 in EAX and execute iret. 
+The system call wrapper function coded in C can then return to its caller (e.g., 
+test function main()) which checks the return value of the wrapper function
+(i.e., value in EAX by CDECL) to note that the system call failed.
+</p>
+
+<p>
+After checking that the value in EAX passed by a system call wrapper function
+is valid, _Xint40 will push system call arguments (one for getprio() and two for
+chprio()) onto the stack and
+conditionally jump to getprio() or chprio(). We will reuse and treat existing
+XINU system calls which are regular C functions as internal kernel functions that
+perform the requested task. For example, in Linux internal kernel function
+do_fork() carries out the actual work of spawning a child process. Since
+getprio() and chprio() are translated into machine code by gcc following CDECL,
+when calling them from _Xint40 we must abide by CDECL so that caller/callee
+interaction works correctly. Moreover, getprio() and chprio() will return
+values in EAX per CDECL. Since the return values from getprio() and chprio()
+must be communicated back to their wrapper functions, the intermediary _Xint40 must not modify
+EAX before executing iret. The wrapper functions coded in C are translated by gcc,
+hence will expect
+return values in EAX. Wrapper functions which act as system call APIs, in turn, 
+return to their caller (e.g., test function main()) with return value stored in EAX.
+The above is an application of ABI programming practiced in lab1.
+</p>
+
+<h3>4.3 Three software layers for implementing trapped system calls</h3>
+
+<p>
+When implementing trapped system calls we need to handle three layers
+of software. First, system call wrapper functions that act as system call API for app
+programmers (part of C standard library in Linux)
+to invoke operating system services. For example, fork()
+which is part of the C standard library is such a wrapper function.
+This will be elaborated in 4.4. Second, system
+call dispatcher code (in our case _Xint40 in intr.S) to which system call wrapper
+functions trap to. This was discussed in 4.2. Third, the internal kernel
+functions that actually perform requested kernel services.
+In our case, they are the existing XINU
+system call functions getprio() and chprio() that are called by _Xint40.
+The third layer is coded in C (getprio() and chprio()), the
+second layer (_Xint40) is coded in assembly, and the first layer discussed 
+in 4.4 is coded in a mix of C and assembly.
+The interfaces between the three software layers
+must be carefully implemented so that the resultant interaction
+works seamlessly.
+</p>
+
+
+<h3>4.4 System call wrapper functions: general design</h3>
+
+<p>
+In Linux, fork() is a system call wrapper function (part of
+glibc on our frontend lab machines) that acts as the system call API 
+for app programmers. It
+traps to the system call dispatcher which
+then calls internal kernel functions to carry out the work of spawning a child
+process. The same three layers as in our XINU trapped system call set-up.
+We will code two wrapper functions,
+syscall xgetprio(pid32), in xgetprio.c, and pri16 xchprio(pid32, pri16), in
+xchprio.c, both under system/. An app programmer will call xgetprio() to
+invoke the kernel service getprio(), 
+and analogously for xchprio() to change the
+priority of a specific process. getprio() and chprio() which are regular C functions
+will be repurposed as internal kernel functions. For example, an app process
+with statement
+</p><pre>x = xchprio(6, 29);
+</pre>
+in its C code is requesting that XINU set the priority of the process with PID 6
+to 29. xchprio() returns -1 if the system call fails, or the old priority value of
+the process if it succeeds.
+xchprio() traps to the kernel's system call dispatcher _Xint40 which calls
+internal kernel function chprio() to carry out the actual work.
+In general, kernel code that implements system calls such as xchprio() contain
+privileged operations that can only be performed in kernel mode. Hence
+calling do_fork() in Linux from app code in user mode will fail since its execution
+will involve one or more privileged operations (e.g., updating the process table
+in kernel memory) that require kernel mode.
+<p></p>
+
+
+<h3>4.5 System call wrapper functions: xchprio() and xgetprio()</h3>
+
+<p>
+We will code system call wrapper functions in C with inline assembly
+to effect passing of system call arguments (register EAX and stack).
+Code xchprio() in xchprio.c and xgetprio() in xgetprio.c, both in system/.
+We encountered a simple form of inline assembly in 3.4 where we embedded assembly
+instruction, "int $6", inside C function main() using asm("int $6") to
+generate a software interrupt for the invalid opcode exception. Except in very
+simple cases that require no communication of values between C and embedded
+inline assembly code, we will need to use a richer framework for embedding
+assembly code in C code called extended inline assembly. xgetprio()
+has one argument and returns a value of type syscall (i.e., int32). Extended
+inline assembly allows values to be communicated between C variables
+and registers in assembly code.
+In general, extended assembly may involve passing of
+arguments and execution of multiple instructions which require careful
+specification following extended asm() syntax so that the embedded assembly
+code does not conflict with the surrounding assembly code generated by gcc
+when translating the C code of xgetprio(). 
+</p>
+
+<p>
+In the case of extended inline assembly code inserted in xgetprio() C code,
+before executing instruction, int $40, we will need to store the system call number 
+11 which identifies xgetprio() in register EAX needed by _Xint40.
+When _Xint40 returns to the next instruction of xgetprio()
+by executing iret, we may need to copy the return value contained in EAX to 
+a local C variable of xgetprio() if further operations on the returned value
+are performed by xgetprio(). If not, leaving the value untouched in EAX
+may suffice since the CDECL caller/callee interface between main() and
+xgetprio() expects xgetprio() to put its return value in EAX.
+In general, extended inline assembly follows the format
+<br><br>
+asm(assembler template
+<br>
+   : output operands
+<br>
+   : input operands
+<br>
+   : clobbered registers);
+<br><br>
+The last component, clobbered registers, is a list of registers that the extended
+inline assembly code may be modifying. When embedding the extended inline assembly code,
+this information will be used to save/restore, or avoid if possible, these registers
+in the surrounding assembly code generated by gcc from the C code of xgetprio().
+</p>
+
+<p>
+For our purpose, it is best to start with simple examples with references
+(<a href="https://www.cs.purdue.edu/homes/cs354/manuals.html">html</a>)
+serving as a more comprehensive guide when needed.
+For example, assuming system call number for xgetprio() is stored in local
+C variable, int sysnumb, and the value returned by _Xint40 in EAX is to be copied
+to local C variable, int retnum, asm()'s input operands would specify
+"a"(sysnumb) meaning that the value in C variable sysnumb should be stored in
+EAX. This comprises the input part. For output operands of asm(), we would
+specify "=a"(retnum) meaning that the content of EAX is to be copied into C
+variable retnum. 
+Coding of extended inline assembly for CS354 is minimal involving but a
+few lines of code.
+Verify that xgetprio() and xchprio() work correctly by calling them from main().
+</p>
+
+<h3>4.6 Trapped system call implementation remains in kernel mode</h3>
+
+<p>
+Trapped system calls xgetprio() and
+xchprio() follow the general framework for implementing trapped system calls in
+Linux and Window in x86 with one caveat: when trapping by executing "int $40" in
+system call wrapper functions to _Xint40 via x86's IDT, we did not switch stacks.
+Nor did we concern ourselves with the CPL bits of the CS register which will
+specify whether the current process runs in kernel mode (00) or user mode (11).
+In legacy XINU all processes start in kernel mode and the same run-time stack
+is used when running app code and kernel code. A full-fledged implementation of
+trapped system calls in XINU would necessitate starting processes in user mode,
+saving and restoring CS, DS, SS registers when trapping and untrapping, and
+switching stacks when transitioning between user mode and kernel mode.
+These modifications are not difficult but require additional background on
+x86 hardware support and coding to interface with hardware.
+Since CS354 is an undergraduate introductory operating system course, we will
+exclude the full-fledged features from the scope of our trapped
+system call implementation.
+</p>
+
+
+<p></p>
+<hr width="100%">
+<h2><b>Bonus problem</b> [25 pts]</h2>
+
+<p>
+Extend the trapped XINU system calls to include getpid().
+Denote the wrapper function as xgetpid() in xgetpid.c, and use 12 as
+the system call number.  Test that your implementation works correctly.
+</p>
+
+<p>
+<i>
+Note: The bonus problem provides an opportunity to earn extra credits that
+count toward the lab component of the course. It is purely optional.
+</i>
+</p>
+
+<p></p>
+
+
+<hr width="100%">
+<h2><b>Turn-in instructions</b></h2>
+
+
+<p>
+General instructions:
+</p>
+
+<p>
+When implementing code in the labs, please
+maintain separate versions/copies of code so that mistakes such
+as unintentional overwriting or deletion of code is prevented. 
+This is in addition to the efficiency that such organization provides.
+You may use any number of version control systems
+such as GIT and RCS. Please make sure that your code is protected from public access. 
+For example, when using GIT, use git that manages code locally instead of its
+on-line counterpart github. If you prefer
+not to use version control tools, you may
+just use manual copy to keep track of different versions required for development
+and testing. More vigilance and discipline may be required when doing so.
+</p>
+
+<p>
+The TAs, when evaluating your code, will use their own test code (principally main())
+to drive your XINU code. The code you put inside main() is for your own testing and will,
+in general, not be considered during evaluation.
+</p>
+
+<p>
+If you are unsure what you need to submit in what format, consult the
+<a href="https://www.cs.purdue.edu/homes/hill341/ta-notes.html">TA notes</a> link.
+If it doesn't answer your question, ask during PSOs and office hours which are
+scheduled M-F.
+</p>
+
+<p>
+Specific instructions:
+</p>
+
+<p>
+1. Format for submitting written lab answers and kprintf() added for 
+testing and debugging purposes in kernel code:
+</p><ul>
+<li>
+Provide your answers to the questions below in lab2.pdf and
+place the file in lab2/. You may use any document editing software
+but your final output must be exported and submitted as a pdf file.
+</li>
+<li>
+For problems where you are asked to print values using kprintf(), use
+conditional compilation (C preprocessor directives #define combined with #if and #endif)
+with macro XINUTEST (in include/process.h) to effect
+print/no print depending on if
+XINUTEST is defined or not. For your debug statements, do the same with macro XINUDEBUG.
+</li>
+</ul>
+
+<p>
+2. Before submitting your work, make sure to double-check the
+<a href="http://www.cs.purdue.edu/homes/hill341/ta-notes.html">TA Notes</a>
+to ensure that any additional requirements and instructions have been followed.
+</p>
+
+<p>3. Electronic turn-in instructions:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; i) Go to the xinu-spring2022/compile
+directory and run "make clean".</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ii) Go to the directory where lab2 (containing
+xinu-spring2022/ and lab2.pdf) is a subdirectory. 
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+For example, if /homes/alice/cs354/lab2/xinu-spring2022 is your directory structure, go to 
+/homes/alice/cs354
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iii) Type the following command
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+turnin -c cs354 -p lab2 lab2</p>
+<p></p>
+<p>
+You can check/list the submitted files using
+<br><br>
+turnin -c cs354 -p lab2 -v
+</p>
+
+
+<p>
+<i>Please make sure to disable all debugging output before submitting your code.</i>
+</p>
+
+
+<hr><a href="https://www.cs.purdue.edu/homes/cs354/index.html">Back to the CS 354 web page</a><br>
+
+
+</body></html>

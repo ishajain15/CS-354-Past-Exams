@@ -1,0 +1,430 @@
+<!DOCTYPE html PUBLIC "-//w3c//dtd html 4.0 transitional//en">
+<!-- saved from url=(0052)https://www.cs.purdue.edu/homes/cs354/lab4/lab4.html -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+  
+  
+  
+  <meta name="GENERATOR" content="Mozilla/4.79 [en] (X11; U; Linux 2.4.17 i686) [Netscape]">
+<title>Lab 4: Enhanced Kernel IPC and Run-time Modification of Process Behavior (320 pts)</title>
+<script>
+        window.addEventListener("message", async (event) => {
+          if (event.data && event.data.sender === "sabre") {
+            dijit.byId(event.data.target).set("value", event.data.value);
+          }
+        });
+        </script></head>
+<body>
+<center>
+<h2>CS 354 Spring 2022</h2>
+</center>
+<center>
+<h2>Lab 4: Blocking Send, Deadlock Detection, and 
+Run-time Modification of Process Behavior (320 pts)</h2>
+</center>
+<center>
+<h2>Due: 03/30/2022 (Wed.), 11:59 PM</h2>
+</center>
+<h2>1. Objectives</h2>
+The objectives of this lab are, one, to enhance XINU's IPC services by adding
+system call support for timed send(), two, provide deadlock detection service for
+semaphore system calls, and
+three, use ROP programming techniques to modify
+process behavior from a hacker's perspective.
+ROP techniques will be used in lab5 to support asynchronous IPC with callback
+function support.
+<hr width="100%">
+<h2>2. Readings</h2>
+<ul>
+  <li>Read Chapters 6 and 7 of the XINU textbook.</li>
+</ul>
+
+<hr width="100%">
+
+<p>
+<i>
+Please use a fresh copy of XINU, xinu-spring2022.tar.gz, but for preserving
+the mygreeting() function from lab1 and removing all code related to xsh from main(). 
+</i>
+</p>
+
+<h2>3. Blocking message send with timeout [120 pts]</h2>
+
+<p>
+This problem concerns the implementation
+of a blocking version of <em>send</em>(), call it <em>sendblk</em>().
+sendblk() follows the same function definition as send()
+but has an additional argument that allows for timed
+blocking similar to recvtime(). The additional argument, tlimit, is of type
+int32 and specifies in unit of seconds how long a process may block before
+it returns.  If tlimit is -1, sendblk() blocks indefinitely.
+If its value is 0, then sendblk() overwrites the receiver's
+message buffer with its message and returns.
+</p>
+
+<p>
+Thus, if the receiver's 1-word message buffer is empty, sendblk() behaves
+like send(). If the receiver's buffer is full, sendblk() does not block if
+tlimit is 0 but blocks if tlimit is positive or -1, i.e., the kernel context switches
+out the calling process
+and puts it into a waiting state. This is implemented
+by defining an additional constant PR_SNDBLK (choose
+an appropriate value to assign) in process.h. The 1-word message that makes
+the calling process block is stored in the sending process's
+process table entry by defining two additional fields:
+<br><br>
+umsg32&nbsp;&nbsp;&nbsp;&nbsp; sndblkmsg;
+<br>
+uint16 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sndstatus;
+<br><br>
+where sndblkmsg holds the 1-word message and sndstatus is nonzero if
+sndblkmsg is valid. In addition, if tlimit is positive, the sending process
+is inserted in the sleep queue to be woken up after tlimit timer.
+If the receiver buffer eventually clears and the
+blocked process succeeds in sending a message before the tlimit
+sleep expires, the process must be removed from the sleep queue. 
+Use unsleep() to
+remove a sleeping process from the sleep queue.
+If tlimit elapses before sending succeeds, the timed
+blocking process is dequeued and readied by the clock interrupt handler.
+sendblk() should return MAXBLKEX (assign a meaningful value)
+to indicate that sending has failed due
+to timeout.
+</p>
+
+<p>
+All the sending processes that are inserted into the sleep queue are also inserted
+into a separate FIFO queue that contains sending processes blocking to send to
+a common receiver. The FIFO queue is implemented by adding fields in the process
+table entry of the receiver process that specify the FIFO queue and whether the
+queue is empty. Define your own field types and data structures for this purpose. 
+Describe their meaning in lab4.pdf.
+If tlimit is -1, i.e., the sending process may wait
+indefinitely without timeout, it is inserted into the FIFO queue only.
+That is, the sleep queue does not need to be updated.
+</p>
+
+<p>
+On the receiver side, before a receiving process returns from
+receive() it must check if there are any blocked sending processes,
+and if so, unblock one of the waiting processes from its FIFO queue.
+If the unblocked (i.e., readied) process had performed a timed sendblk(),
+then it must also be removed from the sleep queue.
+In lab4.pdf, discuss the overhead of sendblk() and the revised
+receive(). Introducing sendblk() entails changes to several parts of
+legacy XINU. List all the legacy code that needed to
+be modified, new code that needed to be introduced and their synopsis 
+in a text file README under lab4/. That includes
+changes to header files. When patching a kernel, specification of
+the changes is the first step in identifying dependencies that must be
+resolved to achieve a correct kernel binary.
+</p>
+
+<p>
+Create test
+cases whose output (e.g., senders may print sender-specific 1-word
+messages before calling sendblk() and a receiver may
+print a received message) demonstrate the correct functioning
+of the blocking message send extension of kernel services.
+In the case of timed send, print the current time in millisecond (use the
+millisecond counter interruptcounter from lab3) before calling sendblk() and the time
+after sendblk() returns, along with the process ID. In the case
+of non-timed send with indefinite blocking, make the receiver sluggish
+(i.e., it sleeps a lot) so that its FIFO sender queue builds up.
+The sequence of printouts to console should show the correct functioning
+of the blocking send kernel extension. The most complicated test
+case is one with timed blocking send where in some instances
+timers expire, in others sending succeeds. Careful crafting of
+the test cases is required to verify for yourself that your revised
+kernel is working correctly, in addition to demonstrating to
+others. In lab4.pdf describe how you set up your test
+cases and their rationale.
+</p>
+
+
+<hr width="100%">
+<h2>4. Deadlock detection extension of semaphores [120 pts]</h2>
+<p>
+As discussed in class, deadlock detection is
+an overhead-prone service, and given its limited impact on
+the system as a whole (assuming isolation/protection is
+implemented),
+a kernel may choose not to provide deadlock
+related services as part of its system call suite.
+In this problem, you are asked to extend the semaphore services exported
+by XINU such that deadlock detection -- when so desired
+by a user process -- is provided.
+There are different approaches for implementing deadlock
+detection. The specific approach we will follow
+defines a sibling system call of <em>wait</em>(), call it
+<em>waitdlk</em>(), which checks if waiting on a semaphore
+would result in a cycle in the semaphore resource
+graph which XINU maintains.
+If not, the resultant blocking action is the same as
+wait(). On the other hand, if a cycle were to result,
+waitdlk() returns to the
+calling process without blocking
+with error status -2. Define it as SYSERR_DLK in
+the same header file where SYSERR is defined. By checking
+the return value of waitdlk(), a
+process is alerted of the impending deadlock. What action the
+process subsequently takes is up to the app programmer.
+The system call <em>signal</em>() also gets a sibling, <em>signaldlk</em>().
+</p>
+
+<p>
+Since waitdlk(), as with wait(), executes its
+code after disabling interrupts, the overhead incurred by
+linear time deadlock detection is a key concern.
+Describe in lab4.pdf how you go about performing
+deadlock detection. Define your own data structures for
+implementing the semaphore resource graph and specify them
+in dlk.h under include/. As noted in class, we have not
+covered memory management hence you may not use dynamic
+memory allocation primitives (getmem() in XINU) to
+implement the resource graph. Instead, use static allocation
+(e.g., defining additional process table entries) to
+implement a resource graph.
+A process is put in a
+semaphore queue in PR_WAITING state when it blocks due
+to waitdlk(). When that happens, the semaphore resource graph is updated
+to reflect the change. If a process is released from
+PR_WAITING state by signaldlk(), the semaphore resource graph
+is updated accordingly. When signaldlk() is called that
+changes a process from PR_WAITING to PR_READY state and dequeues
+it from a semaphore queue, the
+semaphore resource graph must be updated as well.
+Deadlock detection is not guaranteed
+if a programmer uses both wait() and waitdlk() (or signal() and signaldlk()) system
+calls in the same app code.
+</p>
+<p>
+Evaluate your kernel extension
+with three test cases, starting with a 2-process/2-semaphore
+deadlock scenario under the default XINU scheduler.
+Note that inducing
+deadlock, in itself, requires some effort, hence the critical section code
+serves to induce deadlocks.
+In the second test case, extend to three processes and three semaphores.
+Create a third test case and describe its set-up and rationale in lab4.pdf.
+A default action by a programmer using waitdlk() that returns SYSERR_DLK is to
+terminate the application.
+Are there other actions that a programmer may undertake with
+the help of waitdlk() that are less drastic? Note that sleeping a while
+and then attempting waitdlk() again, in general, will not help.
+Discuss your thoughts in lab4.pdf.
+</p>
+
+
+<hr width="100%">
+<h2>5. Modifying process run-time behavior via ROP and context manipulation [80 pts]</h2>
+
+<p>
+An important technique for modifying the run-time behavior of a process is ROP (return-oriented
+programming) based process context manipulation where
+return addresses in a process's run-time stack are changed to affect its control flow. The
+technique can be used for good and bad. In the latter, a hacker may find ways to change
+a return address in a stack/buffer overflow attack (also called stack
+smashing) which has been the single biggest security exploit 
+for compromising computing systems. 
+We will consider a surgical version of this technique in XINU that allows an attacker process
+to "hijack" the context of a victim process.
+</p>
+
+<h3>5.1 Overt attacker</h3>
+
+<p>
+Spawn two app processes from main() back-to-back using create()/resume(), 
+one running codeV() ("victim") in codeV.c and the other running codeA() ("attacker")
+in codeA.c. 
+Use the legacy scheduler of XINU and
+assign priority 35 to codeV() and priority 25 to codeA().
+The code of codeV(), void codeV(void), outputs "codeV: pt1\n" by calling kprintf(),
+then calls sleepms() to sleep for 400 msec, and then prints "codeV: pt2\n" before terminating.
+</p>
+
+<p>
+The process running codeA() is an attacker that aims to hijack the process executing
+codeV() by borrowing its context. The attacker possesses specialized knowledge such as knowing
+that it will get a chance to run
+when codeV() calls sleepms(). When the victim process
+running codeV() is context-switched out, its stack will contain the stack frames of
+sleepms(), resched(), and ctxsw(). codeA()'s goal, when it is context-switched in,
+is to modify the return address (EIP) of ctxsw() -- following CDECL EIP was pushed at the boundary
+of the stack frames of resched() (caller) and ctxsw() (callee) --
+in the stack of the context-switched out victim process.
+The attacker, if he/she knows how to find the return address of ctxsw() in the stack of the victim
+process, surgically modifies the return address so that when the
+victim process is context-switched in
+after sleeping for 400 msec it will not return to resched() but jump to code belonging to
+the attacker, malwareA() in malware.c. That is, malwareA() which was not called by the victim process
+nor the attacker process, will run in the context of the victim process
+with ESP pointing to the stack frame of resched()
+as if malwareA() -- not resched() -- had called ctxsw().
+Although in XINU we do not implement user mode/kernel mode
+separation, if the attack had been successfully carried out in Linux/Windows it would have allowed
+the attacker to run his/her code malwareA() in kernel mode since the victim has yet
+to return to user code.
+</p>
+
+<p>
+The attacker's "malware" function, void malwareA(void), outputs "codeA\n" by calling kprintf().
+When the victim process wakes up from sleep and outputs "codeA\n" we know that the attacker
+has been successful in hijacking the victim process.
+That is, the attacker has successfully
+induced the victim process to execute code that is not part of the victim's code.
+If malwareA() were to call kill() to terminate the victim process after printing "codeA\n",
+the remainder of codeV() which prints 
+"codeV: pt2\n" would not be executed.
+Create subdirectory v1/ under lab4/ and place the victim, attacker code, and main.c in v1/.
+</p>
+
+<h3>5.2 Clandestine attacker</h3>
+
+<p>
+The attack in 5.1 would have successfully borrowed the context of the victim process, however,
+by terminating the victim process without executing the remainder 
+of the victim's code (i.e., return from sleepms() which prints "codeV: pt2\n")
+the fact that an attack had taken place would have been easily detectable.
+A more clandestine attacker would seek to hide his/her tracks by printing "codeA\n" (of course,
+in an actual clandestine attack the attacker does not announce itself on the console)
+and returning from malwareA() back to the next instruction in codeV()
+following the call to sleepms(). 
+Hence the victim process, except for the brief interlude
+during which its context was intercepted by the attacker, executes normally and remains
+oblivious to the attack.
+</p>
+
+<p>
+Implement the ROP stack attack by coding main(), codeV(), codeA(), and malwareA() and placing
+them in separate files following our usual convention in system/.
+codeA() and malwareA() should be written in C using extended inline assembly.
+Explain in lab4.pdf how you go about accomplishing the goals of 5.1 and 5.2.
+When testing your code, first run it without activating the return address manipulation
+by codeA() so that everything proceeds normally. Then activate codeA() to
+play the role of a hacker, first by terminating the victim after
+printing "codeA\n" (5.1), and then returning from malwareA() so that the victim
+is oblivious to the attack and prints "codeV: pt2\n" (5.2).
+Create subdirectory v2/ under lab4/ and place the victim, attacker code, and main.c in v2/.
+</p>
+
+
+<h2><b>Bonus problem</b> [20 pts]</h2>
+
+<p>
+In Problem 5.2 we modified the return address of ctxsw() to effect a detour to
+malware code, malwareA(), before resuming execution of the victim code, codeV().
+In the specific test scenario where codeV() calls sleepms(), an attacker may
+choose to modify the return address of resched() or that of sleepms() to borrow
+the context of the victim process to run malware code before jumping back to
+codeV() and continue after the call to sleepms(). Describe how you would go
+about finding the return address of resched() or sleepms() in the victim 
+process's stack to modify. From a hacker's perspective, discuss the pros/cons
+of modifying the return address of ctxsw(), resched(), or sleepms().
+Submit your answer in lab4.pdf.
+</p>
+
+<p>
+<i>
+Note: The bonus problem provides an opportunity to earn extra credits that
+count toward the lab component of the course. It is purely optional.
+</i>
+</p>
+
+
+<p></p>
+
+
+<hr width="100%">
+<h2><b>Turn-in instructions</b></h2>
+
+<p>
+General instructions:
+</p>
+
+<p>
+When implementing code in the labs, please
+maintain separate versions/copies of code so that mistakes such
+as unintentional overwriting or deletion of code is prevented. 
+This is in addition to the efficiency that such organization provides.
+You may use any number of version control systems
+such as GIT and RCS. Please make sure that your code is protected from public access. 
+For example, when using GIT, use git that manages code locally instead of its
+on-line counterpart github. If you prefer
+not to use version control tools, you may
+just use manual copy to keep track of different versions required for development
+and testing. More vigilance and discipline may be required when doing so.
+</p>
+
+<p>
+The TAs, when evaluating your code, will use their own test code (principally main())
+to drive your XINU code. The code you put inside main() is for your own testing and will,
+in general, not be considered during evaluation.
+</p>
+
+<p>
+If you are unsure what you need to submit in what format, consult the
+<a href="https://www.cs.purdue.edu/homes/hill341/ta-notes.html">TA notes</a> link.
+If it doesn't answer your question, ask during PSOs and office hours which are
+scheduled M-F.
+</p>
+
+<p>
+Specific instructions:
+</p>
+
+<p>
+1. Format for submitting written lab answers and kprintf() added for 
+testing and debugging purposes in kernel code:
+</p><ul>
+<li>
+Provide your answers to the questions below in lab4.pdf and
+place the file in lab4/. You may use any document editing software
+but your final output must be exported and submitted as a pdf file.
+</li>
+<li>
+For problems where you are asked to print values using kprintf(), use
+conditional compilation (C preprocessor directives #define combined with #if and #endif)
+with macro XINUTEST (in include/process.h) to effect
+print/no print depending on if
+XINUTEST is defined or not. For your debug statements, do the same with macro XINUDEBUG.
+</li>
+</ul>
+
+<p>
+2. Before submitting your work, make sure to double-check the
+<a href="http://www.cs.purdue.edu/homes/hill341/ta-notes.html">TA Notes</a>
+to ensure that any additional requirements and instructions have been followed.
+</p>
+
+<p>3. Electronic turn-in instructions:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; i) Go to the xinu-spring2022/compile
+directory and run "make clean".</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ii) Go to the directory where lab4 (containing
+xinu-spring2022/ and lab4.pdf) is a subdirectory. 
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+For example, if /homes/alice/cs354/lab4/xinu-spring2022 is your directory structure, go to 
+/homes/alice/cs354
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iii) Type the following command
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+turnin -c cs354 -p lab4 lab4</p>
+<p></p>
+<p>
+You can check/list the submitted files using
+<br><br>
+turnin -c cs354 -p lab4 -v
+</p>
+
+
+<p>
+<i>Please make sure to disable all debugging output before submitting your code.</i>
+</p>
+
+
+<hr><a href="https://www.cs.purdue.edu/homes/cs354/index.html">Back to the CS 354 web page</a><br>
+
+
+
+</body></html>

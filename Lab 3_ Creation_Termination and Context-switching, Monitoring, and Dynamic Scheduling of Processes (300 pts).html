@@ -1,0 +1,524 @@
+<!DOCTYPE html PUBLIC "-//w3c//dtd html 4.0 transitional//en">
+<!-- saved from url=(0052)https://www.cs.purdue.edu/homes/cs354/lab3/lab3.html -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+  
+  
+  
+  <meta name="GENERATOR" content="Mozilla/4.79 [en] (X11; U; Linux 2.4.17 i686) [Netscape]">
+<title>Lab 3: Creation/Termination and Context-switching, 
+Monitoring, and Dynamic Scheduling of Processes (300 pts)</title>
+<script>
+        window.addEventListener("message", async (event) => {
+          if (event.data && event.data.sender === "sabre") {
+            dijit.byId(event.data.target).set("value", event.data.value);
+          }
+        });
+        </script></head>
+<body>
+<center>
+<h2>CS 354 Spring 2022</h2>
+</center>
+<center>
+<h2>Lab 3: 
+Monitoring and Dynamic Scheduling of Processes (270 pts)</h2>
+</center>
+<center>
+<h2>Due: 03/09/2022 (Wed.), 11:59 PM</h2>
+</center>
+<h2>1. Objectives</h2>
+The objectives of this lab are to instrument XINU to
+monitor resource consumption and performance
+of processes, monitor and classify the behavior of processes 
+to balance the needs of CPU- and I/O-bound processes
+to achieve equitable sharing of resources during dynamic priority scheduling.
+<hr width="100%">
+<h2>2. Readings</h2>
+<ul>
+  <li>Chapter 5 from the XINU textbook.</li>
+</ul>
+
+<hr width="100%">
+
+<p>
+<i>
+Please use a fresh copy of XINU, xinu-spring2022.tar.gz, but for preserving
+the mygreeting() function from lab1 and removing all code related to xsh from main(). 
+Any code ported from lab2 are specified below.
+</i>
+</p>
+
+
+<h2>3. Monitoring process CPU usage [80 pts]</h2>
+
+<h3>3.1 Total CPU usage and utilization</h3>
+
+<p>
+We will reuse the global variable, int interruptcounter, from Problem 3.5 in lab2 to
+implement a system timer that keeps track of CPU time since bootloading
+at the millisecond granularity.
+To do that, modify clkdisp.S so that interruptcounter is incremented before calling
+clkhandler(). 
+To monitor CPU usage of the current process, we will introduce another
+global variable, int current_cputime, declared in initialize.c that is used to
+keep track of CPU usage of the current process (in msec unit) since it was
+context-switched in. As with interruptcounter, current_cputime is incremented in 
+clkdisp.S. To monitor total CPU usage of a process since its creation, we will
+define a new process table field, uint32 prtotcpu, initialized to 0 when a process
+is created that is updated when a process is context-switched out. For prtotcpu
+to be an accurate tally of CPU usage of the current process we must add 
+current_cputime. To support querying of total CPU usage by app processes,
+implement a new system call, syscall cpuusage(pid32 pid), in system/cpuusage.c that returns CPU
+usage of the process given by the argument. Upon error, cpuusage() returns
+SYSERR. In lab3.pdf explain the limitations of cpuusage(). For testing purposes
+in CS354 where a run does not last more than tens of seconds
+they will not surface as an issue. In a production system they will be a
+problem that needs to be addressed.
+</p>
+
+<p>
+We will also support querying of CPU utilization by implementing a system call,
+uint32 cpuutil(void), in system/cpuutil.c that returns an integer in the range 
+0-100 that specifies the percentage of CPU time since bootloading that was
+spent doing useful activities. By default, "useful" will mean not running the 
+idle/NULL process.
+</p>
+
+<h3>3.2 Current process CPU usage</h3>
+
+<p>
+To monitor CPU usage of the current process, we need to consider what needs to
+happen when a process is context-switched in and context-switched out. In the
+latter, the "old" process's current_cputime must be added to its process table
+field prtotcpu. In the former, after the old process's total CPU usage has
+been updated, current_cputime must be reset to 0 so that the new process's
+CPU usage can be tallied. Updating of current_cputime
+is performed by clkdisp.S in 3.1. Explain in lab3.pdf where this is best
+done in XINU code. Consider the fact that the new process being context-switched
+in may have occupied the CPU before or is running for the very first time.
+Note whether this matters or not. Also consider that the idle process is not
+spawned using create() but "handcrafted" when the kernel is initialized.
+</p>
+
+<h3>3.3 Testing and verification of correctness</h3>
+
+<p>
+Testing and verifying that software runs correctly is arguably the most
+challenging part of software engineering, not coding per se. An operating
+system that manages hardware and app processes running on the hardware is
+a complex system. Even what appear to be straightforward modifications
+such as monitoring CPU usage require careful consideration to establish
+that the software changes work as intended, i.e., correctly.
+In complex real-world systems such as operating systems, it is next to 
+impossible to definitely demonstrate that software works correctly.
+All we can do is demonstrate that with high likelihood software 
+implementations work as intended. Whether software testing demonstrates
+"high likelihood" depends on the standards and adherence to the standards
+of the tester. Describe in lab3.pdf how you would approach demonstrating
+that your implementation of 3.1 and 3.2 work correctly. Perform your tests
+and discuss the results.
+The TAs will complement your tests with their own tests to gauge
+correctness.
+</p>
+
+
+<hr width="100%">
+<h2>4. Monitoring responsiveness [30 pts]</h2>
+
+<p>
+For some processes such as interactive apps, responsiveness is an important
+performance criterion. One measure of responsiveness is how long a ready process
+has to wait until it executes on a CPU. To measure responsiveness we will add
+three new process table fields: uint32 prnumcurrent, uint32 prreadywait, and
+uint32 prreadystart. The fields
+are initialized to 0 when a process is created. prnumcurrent counts how many times
+a process runs on the CPU. prreadywait is the sum of all the delays (in msec) a
+process incurs while waiting in XINU's ready list. Hence prreadywait divided by
+prnumcurrent is the average response time of a process that awaits execution. To
+measure response time, prreadystart is set to interruptcounter when a process
+is inserted into the ready list. When a process becomes current, prreadystart is
+subtracted from interruptcounter and added to prreadywait. prnumcurrent is
+incremented by 1.
+</p>
+
+<p>
+To support querying response time of a process, implement a new system call, 
+syscall responsetime(pid32 pid), in system/responsetime.c that returns prreadywait
+divided by prnumcurrent in unit of msec. If pid is invalid or prnumcurrent
+is 0, return SYSERR. Test to establish that your code works correctly.
+</p>
+
+<hr width="100%">
+<h2>5. Dynamic priority scheduling [160 pts]</h2>
+
+<h3>5.1 Objective of process scheduling</h3>
+
+<p>
+The default XINU scheduler is a static (or fixed) priority scheduler that uses
+priorities specified in the create() system call and never changes them.
+XINU's process scheduler, resched(), picks a highest priority ready
+process to run next. If there is a tie, round-robin scheduling is implemented
+among the group of highest priority processes.
+In computing systems where multiple processes share CPU resources, "fair"
+allocation of CPU cycles is the default goal. The notion of fairness can
+be given different technical meaning. For example, in equal share fairness
+with N tasks needing to be scheduled on a shared resource such as a
+CPU, every task is expected to receive 1/N, i.e., equal share of CPU time.
+This notion of fairness may be used in
+scheduling of messages, called packets, on routers which are devices that
+packets pass through on their journey from source to destination.
+It is used in today's Linux scheduler which was
+changed several years ago implement a form of fair scheduling.
+UNIX and Windows schedulers -- and the prior Linux scheduler -- 
+achieve constant (i.e., O(1)) overhead
+as a function of the number of processes in the system.
+Today's Linux scheduler, called CFS (completely fair scheduler), incurs 
+logarithmic overhead.
+</p>
+
+<p>
+The main issue with applying fair scheduling to operating system scheduling 
+is that processes exhibit diverse traits. For example, many are short-lived whereas
+a few are long-lived. Some processes mostly require CPU cycles and do not tend
+to block whereas others perform a lot of I/O operations 
+that result in blocked system calls.
+The former are referred to as CPU-bound processes, the latter are called
+I/O-bound.
+Enforcing meaningful equal share fairness of CPU usage when
+processes are not created at the same time and have different CPU demands
+add complications that detract from the simple idea of providing equal share
+of CPU cycles.
+Since I/O-bound processes, by their nature,
+tend to require less CPU time than CPU-bound processes, trying to enforce
+equal share leads to complications that are counter to equitable and efficient
+sharing of system resources.
+</p>
+
+<h3>5.2 Differentiated treatment of CPU- and I/O-bound processes</h3>
+
+<p>
+Process scheduling in operating systems is different from general workload scheduling
+in that it accounts for the need to provide differentiated treatment of CPU- and I/O-bound 
+processes. 
+CPU-bound processes require long bouts of CPU cycles.
+I/O-bound processes require significantly less CPU time due to blocking,
+but when unblocked benefit from fast response time. 
+Operating system scheduling aims to
+"compensate" I/O-bound processes for being less CPU hungry 
+by assigning them higher priority over CPU-bound processes in order to 
+enhance responsiveness.
+Since many I/O-bound processes, including web browsers and
+games are interactive, they benefit from differentiated treatment that balances
+the needs of I/O- and CPU-bound processes.
+The specific scheduling
+algorithms employed by UNIX, Windows, and pre-2007 Linux operating systems
+that reward I/O-bound processes with increased responsiveness for not hogging CPU
+cycles is varied. In this problem, we will implement a round-robin FIFO scheduler
+that prioritizes I/O-bound processes over CPU-bound processes.
+We will call it differentiated FIFO (DF) scheduler.
+</p>
+
+
+<h3>5.3 Basic operation of DF scheduler</h3>
+
+<p>
+The basic operation of the differentiated FIFO scheduler to be implemented in XINU
+is as follows. Two FIFO queues are maintained, one for I/O-bound ready processes,
+and another for CPU-bound ready processes. When resched() is invoked, it checks
+if the FIFO queue of I/O-bound processes is non-empty. If so, it picks the first
+process in the queue to become the new occupant of the CPU. The current process is
+context-switched out. If resched() was called by sleepms(), the old process will
+sleep. Upon waking up it will be enqueued in the FIFO queue of I/O-bound processes 
+since it voluntarily relinquished the CPU by making a blocking system call. 
+The old process is enqueued in the FIFO queue of
+CPU-bound processes if resched() was called by clkhandler() because the old process
+exhausted its time slice (i.e., preempt = 0). That is, it did not voluntarily
+give up the CPU but consumed all of its alloted quantum. Whether accurate or not,
+we will take this to mean that the recent behavior of the old process resembles that 
+of a CPU-bound process. The third case is where resched() was called by 
+clkhandler() and the old process has not depleted its time slice. We will enqueue 
+the old process in the FIFO queue of I/O-bound processes.
+</p>
+
+<p>
+When resched() is called and the FIFO queue of I/O-bound processes is empty, then
+the FIFO queue of CPU-bound processes is checked. If it is empty, the current process
+is given a fresh quantum and allowed to remain current. Outside of the idle process,
+it is the only ready process in the system. If the queue is non-empty and the old
+process's time slice is not depleted (i.e., preempt &gt; 0) the old process is allowed
+to remain current. It does not get a fresh quantum but continues consuming its
+partially consumed time slice. If the queue is non-empty and the old process's
+time slice is depleted, the next process in the FIFO queue of CPU-bound processes 
+is dequeued and made current. The old process is enqueued in the FIFO queue of 
+CPU-bound processes. Thus using two FIFO queues, DF scheduling can be implemented
+with constant overhead independent of the number of processes in the system.
+</p>
+
+
+<h3>5.4 Implementation of DF scheduler in XINU</h3>
+
+<p>
+For backward compatibility with legacy XINU, we will forgo the constant overhead
+implementation of DF scheduling but utilize XINU's ready list -- a priority queue --
+to implement a linear overhead version. A process that is deemed I/O-bound will
+be assigned priority IOPRIO defined in include/process.h as 50. A process that is
+classified as CPU-bound is assigned priority CPUPRIO which is defined as 30.
+Instead of introducing two FIFO queues, when enqueueing actions are performed
+in 5.3 we will insert a process in XINU's ready list using the legacy kernel
+function insert(). Hence at any given time, XINU's ready list will have I/O-bound
+process of priority IOPRIO at the front followed by CPU-bound processes of
+priority CPUPRIO. At the very end will be the idle/NULL process. By the way
+insert() is coded when a process to be inserted has the same priority as another
+process in the list, XINU ready list will emulate the actions of two FIFO 
+queues obeying the rules of 5.3. The cost is that enqueueing overhead is not
+constant but linear.
+</p>
+
+<p>
+A newly created process will be assigned priority CPUPRIO. Hence the third
+argument of create() which specifies a process's priority is ignored.
+For simplicity, we will use the same QUANTUM (defined in include/kernel.h) for both
+CPU- and I/O-bound process, albeit with its value changed from 2 to 40.
+The above implementation of DF scheduling in XINU suffers from potential starvation
+of CPU-bound processes if the number of I/O-bound processes is too numerous.
+That is, even though each I/O-bound process may consume very little CPU time and
+block, the number of ready I/O-bound processes may be so many that there is always a
+ready I/O-bound process to take the place of an I/O-bound process that is
+context-switched out. Similar to UNIX Solaris TS scheduling we may introduce
+starvation prevention mechanisms. We will ignore this issue in lab3 and 
+not introduce additional mechanisms.
+</p>
+
+
+<h3>5.5 Evaluation of XINU's DF scheduler</h3>
+
+<p>
+<b>Test applications.</b>
+Code two test applications, void cpuapp(void), that serves as a CPU-bound app and a program,
+void ioapp(void), that acts as an I/O-bound app. The code of cpuapp() in system/cpuapp.c
+works as follows:
+<br><br>
+int i = 0, k;
+<br>
+while(interruptcounter &lt; 5000)    // loop until wall clock time of 5 sec is reached
+<br>
+&nbsp;&nbsp; i++; 
+<br>
+k = getpid();
+<br>
+kprintf("cpuapp: %d %d %d %d\n", k, cpuusage(k), responsetime(k), proctab[k].prnumcurrent);
+<br><br>
+Since interruptcounter tracks system uptime in unit of millisecond,
+cpuapp()
+keeps performing ALU operations until 5 seconds have elapsed at which time it prints its
+PID, CPU usage, response time, and number of times it ran on the CPU.
+</p>
+
+<p>
+<i>
+Note: The C type qualifier, volatile,
+can be used to inform gcc not to engage in register optimization that 
+can result in incorrect execution. In the case
+of interruptcounter in the for-loop, gcc cannot be expected to not know that x86
+asynchronous interrupts through IDT invokes clkdisp which updates interruptcounter. 
+To gcc, the for-loop comparison of interruptcounter against 5000 will appear
+to always result in the same outcome since the for-loop code does not change the
+value of interruptcounter. To optimize for speed, gcc may generate machine code that
+performs the comparison only once then uses the outcome for the remaining 4999
+iterations. Although well-intentioned this can result in a bug.
+To prevent gcc from performing optimizations that can introduce bugs,
+we can declare interruptcounter as volatile.
+In general, when coding software that deals with asynchronous events,
+we need to be vigilant that gcc does no harm.
+gcc is but a tool, and it is up to the
+programmer to utilize it effectively.
+</i>
+</p>
+
+<p>
+The I/O-bound application, ioapp() in system/ioapp.c, works as follows:
+<br><br>
+int i = 0, h, k;
+<br>
+while(interruptcounter &lt; 5000) {   // until wall clock time of 5 sec is reached do
+<br>
+&nbsp;&nbsp; i++; 
+<br>
+&nbsp;&nbsp; for(h=0; h &lt; LOOPBOUND; h++) ;   // consume some more CPU cycles before blocking
+<br>
+&nbsp;&nbsp; sleepms(SLEEPTIME);
+<br>
+}
+<br>
+k = getpid();
+<br>
+kprintf("ioapp: %d %d %d %d\n", k, cpuusage(k), responsetime(k), proctab[k].prnumcurrent);
+<br><br>
+Sleep interval SLEEPTIME and LOOPBOUND should be defined in ioapp.c. They will affect
+the degree to which ioapp() will behave in an I/O-bound manner. Set the default value of
+SLEEPTIME to 200 and LOOPBOUND to 500000.
+We expect CPU usage of ioapp() to be smaller than cpuapp().
+Response time of ioapp() should be smaller than cpuapp().
+Performance contrast between cpuapp() and ioapp() will depend on parameters
+SLEEPTIME and LOOPBOUND. Using the default values as starting point, modify the
+values to yield significant performance differences between cpuapp() and ioapp()
+processes when testing XINU's DF scheduler.
+</p>
+
+<p>
+<b>Test scenario A.</b>
+Create 3 CPU-bound processes from main()
+back-to-back. Assign the process running main() priority 999, and modify
+create() so that so that when the third argument is 999 the priority value is
+not ignored but set to 999. This hack allows main() to create and resume
+child processes before terminating.
+If DF scheduler is implemented correctly, we would
+expect to see the 3 CPU-bound processes receive similar CPU usage, response time,
+and number of times executed on the CPU.. 
+Discuss your result in lab3.pdf.
+</p>
+
+<p>
+<b>Test scenario B.</b>
+Create 3 I/O-bound processes from main() and perform the same benchmark tests as
+scenario A. The three processes must run the same code with the same parameters
+SLEEPTIME and LOOPBOUND.
+Discuss your result in lab3.pdf.
+</p>
+
+<p>
+<b>Test scenario C.</b>
+Create 3 CPU-bound processes and 3 I/O-bound processes. We would expect the 3 CPU-bound processes
+to output similar CPU usage, response time, and prnumcurrent values
+with respect to each other. The same goes for the 3 I/O-bound processes.
+Across the two groups, we would expect CPU-bound processes to receive
+more CPU time than I/O-bound processes but incur larger response time
+than I/O-bound processes. 
+Discuss your results in lab3.pdf.
+</p>
+
+
+<p></p>
+<hr width="100%">
+<h2><b>Bonus problem 1</b> [25 pts]</h2>
+
+<p>
+Devise a workload comprised of I/O- and CPU-bound processes which leads to the
+starvation phenomenon noted in 5.4. Create a subdirectory v1/ under lab3/. Place
+your modified cpuapp.c and ioapp.c in v1/. Test and discuss your result in
+lab3.pdf.
+</p>
+
+<h2><b>Bonus problem 2</b> [25 pts]</h2>
+
+<p>
+Come up with a simple method that helps mitigate the starvation problem. Describe
+the method in lab3.pdf. Implement and test the modified DF scheduler. Create a
+subdirectory v2/ and place all modified code to achieve starvation mitigation
+in v2/. Discuss your results in lab3.pdf.
+</p>
+
+<p>
+<i>
+Note: The bonus problem provides an opportunity to earn extra credits that
+count toward the lab component of the course. It is purely optional.
+</i>
+</p>
+
+<p></p>
+
+
+<hr width="100%">
+<h2><b>Turn-in instructions</b></h2>
+
+
+<p>
+General instructions:
+</p>
+
+<p>
+When implementing code in the labs, please
+maintain separate versions/copies of code so that mistakes such
+as unintentional overwriting or deletion of code is prevented. 
+This is in addition to the efficiency that such organization provides.
+You may use any number of version control systems
+such as GIT and RCS. Please make sure that your code is protected from public access. 
+For example, when using GIT, use git that manages code locally instead of its
+on-line counterpart github. If you prefer
+not to use version control tools, you may
+just use manual copy to keep track of different versions required for development
+and testing. More vigilance and discipline may be required when doing so.
+</p>
+
+<p>
+The TAs, when evaluating your code, will use their own test code (principally main())
+to drive your XINU code. The code you put inside main() is for your own testing and will,
+in general, not be considered during evaluation.
+</p>
+
+<p>
+If you are unsure what you need to submit in what format, consult the
+<a href="https://www.cs.purdue.edu/homes/hill341/ta-notes.html">TA notes</a> link.
+If it doesn't answer your question, ask during PSOs and office hours which are
+scheduled M-F.
+</p>
+
+<p>
+Specific instructions:
+</p>
+
+<p>
+1. Format for submitting written lab answers and kprintf() added for 
+testing and debugging purposes in kernel code:
+</p><ul>
+<li>
+Provide your answers to the questions below in lab3.pdf and
+place the file in lab3/. You may use any document editing software
+but your final output must be exported and submitted as a pdf file.
+</li>
+<li>
+For problems where you are asked to print values using kprintf(), use
+conditional compilation (C preprocessor directives #define combined with #if and #endif)
+with macro XINUTEST (in include/process.h) to effect
+print/no print depending on if
+XINUTEST is defined or not. For your debug statements, do the same with macro XINUDEBUG.
+</li>
+</ul>
+
+<p>
+2. Before submitting your work, make sure to double-check the
+<a href="http://www.cs.purdue.edu/homes/hill341/ta-notes.html">TA Notes</a>
+to ensure that any additional requirements and instructions have been followed.
+</p>
+
+<p>3. Electronic turn-in instructions:</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; i) Go to the xinu-spring2022/compile
+directory and run "make clean".</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ii) Go to the directory where lab3 (containing
+xinu-spring2022/ and lab3.pdf) is a subdirectory. 
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+For example, if /homes/alice/cs354/lab3/xinu-spring2022 is your directory structure, go to 
+/homes/alice/cs354
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iii) Type the following command
+</p>
+<p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+turnin -c cs354 -p lab3 lab3</p>
+<p></p>
+<p>
+You can check/list the submitted files using
+<br><br>
+turnin -c cs354 -p lab3 -v
+</p>
+
+
+<p>
+<i>Please make sure to disable all debugging output before submitting your code.</i>
+</p>
+
+
+<hr><a href="https://www.cs.purdue.edu/homes/cs354/index.html">Back to the CS 354 web page</a><br>
+
+
+
+</body></html>
